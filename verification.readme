@@ -1,0 +1,1010 @@
+# HireX — Verification & Architecture Guide
+
+> A full-stack, biometric-verified hiring platform with active liveness detection,
+> ArcFace facial embeddings, Qdrant vector deduplication, and OTP email verification.
+
+---
+
+## Table of Contents
+
+1. [Project Overview](#1-project-overview)
+2. [System Architecture](#2-system-architecture)
+3. [Tech Stack](#3-tech-stack)
+4. [Project Structure](#4-project-structure)
+5. [Environment Variables](#5-environment-variables)
+6. [Service Setup & Running](#6-service-setup--running)
+   - 6.1 [Frontend (Remix / React Router)](#61-frontend-remix--react-router)
+   - 6.2 [Backend (Express + TypeScript)](#62-backend-express--typescript)
+   - 6.3 [Python FastAPI (ML Service)](#63-python-fastapi-ml-service)
+7. [Authentication Flow — Step by Step](#7-authentication-flow--step-by-step)
+   - 7.1 [Signup Flow](#71-signup-flow)
+   - 7.2 [Login Flow](#72-login-flow)
+8. [Biometric Verification System](#8-biometric-verification-system)
+   - 8.1 [Active Liveness Detection (MediaPipe)](#81-active-liveness-detection-mediapipe)
+   - 8.2 [Anti-Spoofing (MiniFASNet)](#82-anti-spoofing-minifasnet)
+   - 8.3 [Facial Embedding — ArcFace (DeepFace)](#83-facial-embedding--arcface-deepface)
+   - 8.4 [Identity Deduplication (Qdrant)](#84-identity-deduplication-qdrant)
+9. [API Reference](#9-api-reference)
+   - 9.1 [Express Backend Endpoints](#91-express-backend-endpoints)
+   - 9.2 [Python FastAPI Endpoints](#92-python-fastapi-endpoints)
+10. [Database Schemas](#10-database-schemas)
+    - 10.1 [MongoDB — User](#101-mongodb--user)
+    - 10.2 [MongoDB — PendingUser](#102-mongodb--pendinguser)
+    - 10.3 [Qdrant — Face Collection](#103-qdrant--face-collection)
+11. [Frontend Pages](#11-frontend-pages)
+12. [Security Design](#12-security-design)
+13. [Threshold Tuning — ArcFace Cosine Similarity](#13-threshold-tuning--arcface-cosine-similarity)
+14. [Development Notes & Gotchas](#14-development-notes--gotchas)
+15. [Quick Start Cheatsheet](#15-quick-start-cheatsheet)
+
+---
+
+## 1. Project Overview
+
+**HireX** is an enterprise hiring platform that enforces strict identity uniqueness:
+
+- **One email → One account** (enforced at MongoDB level)
+- **One face → One account** (enforced via ArcFace + Qdrant cosine similarity)
+
+Every user who signs up must:
+1. Pass an **active liveness challenge** (blink or head-turn detected by MediaPipe in the browser)
+2. Pass an **anti-spoofing check** (MiniFASNet on the Python backend)
+3. Have their face compared against all existing users via **512-dimensional ArcFace embeddings** stored in **Qdrant Cloud**
+4. Verify their **email via a 6-digit OTP** (sent via SMTP)
+
+Only after all four checks pass is a MongoDB user document created and a JWT issued.
+
+---
+
+## 2. System Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Browser (Port 5173)                          │
+│   Remix / React Router v7 — TypeScript                          │
+│                                                                 │
+│   /           → Landing Page                                    │
+│   /login      → Email + Password Login                          │
+│   /signup     → Multi-step Biometric Signup                     │
+│                 Step 1: Name / Email / Password / Role          │
+│                 Step 2: MediaPipe Face Liveness Challenge        │
+│                 Step 3: 6-Digit OTP Email Verification          │
+│   /dashboard  → Protected Dashboard (JWT required)              │
+└─────────────────────┬───────────────────────────────────────────┘
+                      │  REST / JSON  (credentials: include)
+                      ▼
+┌─────────────────────────────────────────────────────────────────┐
+│              Express Backend (Port 5000)                        │
+│              TypeScript + Mongoose + Nodemailer                 │
+│                                                                 │
+│   POST /api/auth/signup      ──► calls FastAPI (ML checks)      │
+│   POST /api/auth/verify-otp  ──► creates User in MongoDB        │
+│   POST /api/auth/login       ──► bcrypt compare + JWT           │
+│   GET  /api/auth/me          ──► JWT protected user info        │
+│   POST /api/auth/logout      ──► clears cookie                  │
+└────────┬──────────────────────────────────────────┬────────────┘
+         │ axios / JSON                              │ mongoose
+         ▼                                           ▼
+┌─────────────────────────┐            ┌─────────────────────────┐
+│  Python FastAPI (8000)  │            │  MongoDB (local :27017) │
+│  ML Service             │            │  DB: hirex              │
+│                         │            │  Collections:           │
+│  POST /verify-liveness  │            │  - users                │
+│  POST /extract-embedding│            │  - pendingusers         │
+│  POST /check-duplicate  │            └─────────────────────────┘
+│  POST /store-embedding  │
+│                         │
+│  Libraries:             │
+│  - DeepFace (ArcFace)   │
+│  - MiniFASNet (OpenCV)  │
+│  - qdrant-client        │
+└────────────┬────────────┘
+             │ HTTPS + API Key
+             ▼
+┌─────────────────────────┐
+│   Qdrant Cloud           │
+│   Collection: hirex_faces│
+│   Vector: 512-dim        │
+│   Metric: Cosine         │
+└─────────────────────────┘
+```
+
+---
+
+## 3. Tech Stack
+
+| Layer | Technology | Purpose |
+|---|---|---|
+| **Frontend Framework** | React Router v7 (Remix) | SSR-capable routing, loaders, TypeScript |
+| **Frontend Language** | TypeScript | Type safety across all components |
+| **Styling** | Vanilla CSS (custom design system) | Dark theme, glassmorphism, micro-animations |
+| **Face Detection** | MediaPipe Tasks Vision (`@mediapipe/tasks-vision`) | Real-time face landmark detection in browser |
+| **Backend Framework** | Express.js | REST API, auth orchestration |
+| **Backend Language** | TypeScript (compiled via `ts-node` / `tsc`) | Type safety, interfaces shared with DB models |
+| **ODM** | Mongoose | MongoDB schema validation and queries |
+| **Auth** | JSON Web Tokens (`jsonwebtoken`) | Stateless session management |
+| **Password Hashing** | bcryptjs (12 rounds) | Secure credential storage |
+| **Email** | Nodemailer (SMTP) | OTP delivery |
+| **ML Framework** | FastAPI + Uvicorn | High-performance Python ML serving |
+| **Face Embeddings** | DeepFace + ArcFace backend | 512-dim facial feature vectors |
+| **Anti-Spoofing** | MiniFASNet (Silent-Face-Anti-Spoofing) | 2D photo / screen replay prevention |
+| **Vector Database** | Qdrant Cloud | Face embedding storage + cosine similarity search |
+| **Primary Database** | MongoDB (local) | User records, pending signups |
+
+---
+
+## 4. Project Structure
+
+```
+DevClash_HireX/
+│
+├── verification.readme          ← You are reading this
+│
+├── frontend/                    ← Remix / React Router v7
+│   ├── app/
+│   │   ├── app.css              ← Full CSS design system (tokens, components)
+│   │   ├── root.tsx             ← HTML shell, font imports
+│   │   ├── routes.ts            ← Route manifest (/, /login, /signup, /dashboard)
+│   │   ├── components/
+│   │   │   └── FaceCapture.tsx  ← MediaPipe liveness challenge component
+│   │   └── routes/
+│   │       ├── home.tsx         ← Landing page
+│   │       ├── login.tsx        ← Email/password login
+│   │       ├── signup.tsx       ← 3-step biometric signup wizard
+│   │       └── dashboard.tsx    ← Protected user dashboard
+│   ├── package.json
+│   ├── tsconfig.json
+│   └── vite.config.ts
+│
+├── backend/                     ← Express + TypeScript
+│   ├── src/
+│   │   ├── index.ts             ← Express app, MongoDB connection, middleware
+│   │   ├── routes/
+│   │   │   └── auth.ts          ← All auth endpoints
+│   │   ├── middleware/
+│   │   │   └── auth.ts          ← JWT verification middleware
+│   │   ├── models/
+│   │   │   ├── User.ts          ← Verified users schema
+│   │   │   └── PendingUser.ts   ← Signup-in-progress schema (TTL: 15 min)
+│   │   └── utils/
+│   │       ├── email.ts         ← Nodemailer OTP sender
+│   │       └── fastapi.ts       ← Axios client for Python ML service
+│   ├── .env                     ← Secrets (see Section 5)
+│   ├── env.example              ← Placeholder template
+│   ├── package.json
+│   └── tsconfig.json
+│
+└── python/                      ← FastAPI ML Service
+    ├── main.py                  ← FastAPI app + all endpoints
+    ├── face_utils/
+    │   ├── __init__.py
+    │   ├── liveness.py          ← MiniFASNet anti-spoofing wrapper
+    │   └── qdrant_store.py      ← ArcFace extraction + Qdrant CRUD
+    ├── .env                     ← Qdrant credentials (see Section 5)
+    ├── env.example              ← Placeholder template
+    └── requirements.txt         ← All Python dependencies
+```
+
+---
+
+## 5. Environment Variables
+
+### `backend/.env`
+
+```env
+PORT=5000
+NODE_ENV=development
+
+# MongoDB (local)
+MONGODB_URI=mongodb://localhost:27017/hirex
+
+# JWT — change this to a long random string in production
+JWT_SECRET=your_super_secret_jwt_key_change_this_in_production
+JWT_EXPIRES_IN=7d
+
+# Python FastAPI ML Service
+FASTAPI_URL=http://localhost:8000
+
+# SMTP Email (for OTP)
+# For Gmail: enable 2FA → create App Password → paste here
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=your_email@gmail.com
+SMTP_PASS=your_gmail_app_password_here
+FROM_EMAIL=noreply@hirex.com
+
+# Frontend URL (CORS whitelist)
+FRONTEND_URL=http://localhost:5173
+
+# OTP expiry (minutes)
+OTP_EXPIRY_MINUTES=10
+```
+
+### `python/.env`
+
+```env
+# Qdrant Cloud — get from https://cloud.qdrant.io
+QDRANT_URL=https://your-cluster-url.cloud.qdrant.io:6333
+QDRANT_API_KEY=your_qdrant_api_key_here
+QDRANT_COLLECTION_NAME=hirex_faces
+
+# Identity threshold (Cosine Similarity)
+# Score > 0.60 = same person → block signup
+# Increase to 0.70 to be stricter (fewer false accepts)
+COSINE_THRESHOLD=0.60
+
+# Anti-spoofing model directory
+SPOOF_MODEL_DIR=./models/silent_face
+```
+
+> **How to get a Qdrant Cloud API Key:**
+> 1. Go to https://cloud.qdrant.io and sign up (free tier available)
+> 2. Create a cluster → copy the **Cluster URL** and **API Key**
+> 3. Paste them into `python/.env`
+
+> **How to get a Gmail App Password:**
+> 1. Enable 2-Factor Authentication on your Google account
+> 2. Go to: Google Account → Security → App passwords
+> 3. Create a new app password for "Mail"
+> 4. Paste the 16-character password into `SMTP_PASS`
+
+---
+
+## 6. Service Setup & Running
+
+All three services must run simultaneously for the full signup flow to work.
+
+### 6.1 Frontend (Remix / React Router)
+
+**Prerequisites:** Node.js 18+
+
+```powershell
+cd frontend
+npm install        # already done — skip if node_modules exists
+npm run dev        # starts at http://localhost:5173
+```
+
+**Available Scripts:**
+| Command | Description |
+|---|---|
+| `npm run dev` | Development server with HMR |
+| `npm run build` | Production build |
+| `npm start` | Serve production build |
+
+---
+
+### 6.2 Backend (Express + TypeScript)
+
+**Prerequisites:** Node.js 18+, MongoDB running locally on port 27017
+
+```powershell
+cd backend
+npm install        # already done — skip if node_modules exists
+
+# Fill in your .env values first!
+npm run dev        # starts at http://localhost:5000 with nodemon auto-reload
+```
+
+**Available Scripts:**
+| Command | Description |
+|---|---|
+| `npm run dev` | Development with `nodemon` + `ts-node` |
+| `npm run build` | Compile TypeScript → `dist/` |
+| `npm start` | Run compiled JS from `dist/` (production) |
+
+**MongoDB Setup (local):**
+Make sure MongoDB is installed and the service is running:
+```powershell
+# Windows — if installed as a service
+net start MongoDB
+
+# Or start manually
+mongod --dbpath C:\data\db
+```
+The database `hirex` and its collections are created automatically on first use.
+
+---
+
+### 6.3 Python FastAPI (ML Service)
+
+**Prerequisites:** Python 3.10+, pip
+
+```powershell
+cd python
+
+# 1. Create a virtual environment (recommended)
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+
+# 2. Install dependencies
+pip install -r requirements.txt
+# NOTE: First install downloads PyTorch + TensorFlow — may take 10-15 minutes
+
+# 3. Fill in your python/.env values!
+
+# 4. Start the server
+uvicorn main:app --reload --port 8000
+# API docs at: http://localhost:8000/docs
+```
+
+> **Important — First Run:**
+> On first startup, `DeepFace` will automatically download the **ArcFace model weights (~500MB)**
+> to `~/.deepface/weights/`. This is a one-time download.
+>
+> The MiniFASNet anti-spoofing weights (~4MB) are downloaded from GitHub on first `/verify-liveness`
+> call and cached in `python/models/silent_face/`.
+
+---
+
+## 7. Authentication Flow — Step by Step
+
+### 7.1 Signup Flow
+
+```
+User                       Frontend                    Express (5000)       FastAPI (8000)       MongoDB        Qdrant
+ │                             │                             │                    │                  │              │
+ │  Opens /signup              │                             │                    │                  │              │
+ │─────────────────────────────►                             │                    │                  │              │
+ │                             │                             │                    │                  │              │
+ │  Step 1: Enter              │                             │                    │                  │              │
+ │  Name/Email/Password/Role   │                             │                    │                  │              │
+ │─────────────────────────────►                             │                    │                  │              │
+ │                             │  (validates, advances step) │                    │                  │              │
+ │                             │                             │                    │                  │              │
+ │  Step 2: Face Liveness      │                             │                    │                  │              │
+ │  Challenge appears          │                             │                    │                  │              │
+ │  (random: blink/head-turn)  │                             │                    │                  │              │
+ │                             │  MediaPipe detects          │                    │                  │              │
+ │  Performs challenge ────────►  challenge completion        │                    │                  │              │
+ │                             │  Canvas captures frame      │                    │                  │              │
+ │                             │                             │                    │                  │              │
+ │                             │  POST /api/auth/signup      │                    │                  │              │
+ │                             │  { name, email, password,   │                    │                  │              │
+ │                             │    role, faceImage(base64) }│                    │                  │              │
+ │                             │────────────────────────────►│                    │                  │              │
+ │                             │                             │                    │                  │              │
+ │                             │                             │  Check email dupe  │                  │              │
+ │                             │                             │─────────────────────────────────────►│              │
+ │                             │                             │◄─────────────────────────────────────│              │
+ │                             │                             │                    │                  │              │
+ │                             │                             │  POST /verify-liveness (base64 img)   │              │
+ │                             │                             │───────────────────►│                  │              │
+ │                             │                             │                    │MiniFASNet check  │              │
+ │                             │                             │◄───────────────────│ {is_live: true}  │              │
+ │                             │                             │                    │                  │              │
+ │                             │                             │  POST /extract-embedding (base64 img) │              │
+ │                             │                             │───────────────────►│                  │              │
+ │                             │                             │                    │ DeepFace ArcFace │              │
+ │                             │                             │◄───────────────────│ {embedding:[512]}│              │
+ │                             │                             │                    │                  │              │
+ │                             │                             │  POST /check-duplicate ([512] vector) │              │
+ │                             │                             │───────────────────►│                  │              │
+ │                             │                             │                    │  Qdrant search   │              │
+ │                             │                             │                    │─────────────────────────────────►
+ │                             │                             │                    │◄─────────────────────────────────
+ │                             │                             │◄───────────────────│ {is_duplicate:false}             │
+ │                             │                             │                    │                  │              │
+ │                             │                             │  POST /store-embedding (staging point)│              │
+ │                             │                             │───────────────────►│                  │              │
+ │                             │                             │                    │─────────────────────────────────►
+ │                             │                             │◄───────────────────│ {point_id: "..." }               │
+ │                             │                             │                    │                  │              │
+ │                             │                             │  bcrypt hash password                 │              │
+ │                             │                             │  generate 6-digit OTP                 │              │
+ │                             │                             │  save PendingUser ─────────────────► │              │
+ │                             │                             │  send OTP email ──────────────────────────────────── ►
+ │◄────────────────────────────│◄────────────────────────────│                    │                  │              │
+ │  { message: "OTP sent" }    │                             │                    │                  │              │
+ │                             │  advances to Step 3         │                    │                  │              │
+ │                             │                             │                    │                  │              │
+ │  Step 3: Enter OTP          │                             │                    │                  │              │
+ │─────────────────────────────►                             │                    │                  │              │
+ │                             │  POST /api/auth/verify-otp  │                    │                  │              │
+ │                             │  { email, otp }             │                    │                  │              │
+ │                             │────────────────────────────►│                    │                  │              │
+ │                             │                             │  validate OTP + expiry                │              │
+ │                             │                             │  create User ────────────────────────►│              │
+ │                             │                             │  delete PendingUser ─────────────────►│              │
+ │                             │                             │  sign JWT                             │              │
+ │◄────────────────────────────│◄────────────────────────────│                    │                  │              │
+ │  { token, user }            │                             │                    │                  │              │
+ │                             │  localStorage.token = JWT   │                    │                  │              │
+ │                             │  navigate("/dashboard")     │                    │                  │              │
+```
+
+---
+
+### 7.2 Login Flow
+
+```
+User             Frontend               Express (5000)         MongoDB
+ │                   │                       │                     │
+ │  /login page       │                       │                     │
+ │───────────────────►│                       │                     │
+ │                   │                       │                     │
+ │  Enter email +    │                       │                     │
+ │  password ────────►                       │                     │
+ │                   │  POST /api/auth/login  │                     │
+ │                   │  { email, password }  │                     │
+ │                   │──────────────────────►│                     │
+ │                   │                       │  find user by email ►│
+ │                   │                       │◄────────────────────│
+ │                   │                       │  bcrypt.compare()   │
+ │                   │                       │  sign JWT           │
+ │◄──────────────────│◄──────────────────────│                     │
+ │  { token, user }  │                       │                     │
+ │                   │  localStorage.token   │                     │
+ │                   │  navigate /dashboard  │                     │
+```
+
+---
+
+## 8. Biometric Verification System
+
+### 8.1 Active Liveness Detection (MediaPipe)
+
+**File:** `frontend/app/components/FaceCapture.tsx`
+
+The component uses `@mediapipe/tasks-vision` FaceLandmarker, which tracks **468 facial landmarks** in real-time via webcam.
+
+#### Challenge Types
+
+| Challenge | Detection Method | Landmarks Used |
+|---|---|---|
+| **Blink** | Eye Aspect Ratio (EAR) < 0.15 after being open (> 0.25) | 6 landmarks per eye (L: 362,385,387,263,373,380 / R: 33,160,158,133,153,144) |
+| **Turn Right** | Nose tip offset > +6% of face width | Nose tip (1), Left face (234), Right face (454) |
+| **Turn Left** | Nose tip offset < -6% of face width | Same as above |
+
+#### EAR Formula
+```
+EAR = (‖P2-P6‖ + ‖P3-P5‖) / (2 × ‖P1-P4‖)
+
+Where P1–P6 are the 6 eye landmark points.
+EAR ≈ 0.3  → eyes open
+EAR < 0.15 → eyes closed (blink detected)
+```
+
+#### Flow
+1. Random challenge selected on page load
+2. MediaPipe runs at ~30 FPS detecting landmarks
+3. Once challenge condition is met, canvas captures a 1:1 mirror-corrected frame
+4. Frame sent as JPEG base64 to `POST /api/auth/signup`
+
+---
+
+### 8.2 Anti-Spoofing (MiniFASNet)
+
+**File:** `python/face_utils/liveness.py`
+
+Based on **Silent-Face-Anti-Spoofing** by minivision-ai.
+
+#### What It Prevents
+- Printed photographs held in front of camera
+- Replaying a face on a phone/screen
+- 3D masks (partially)
+
+#### How It Works
+1. Detects face ROI using OpenCV Haar Cascade
+2. Runs the MiniFASNet model on the face crop
+3. Returns a liveness confidence score (0–1)
+4. Threshold: `confidence > 0.25` → live
+
+#### Dev Mode Fallback
+If model weights haven't been downloaded yet, the service returns `is_live: true` with a dev-mode flag so the rest of the pipeline still works. **Disable this in production** by ensuring the weights are present.
+
+---
+
+### 8.3 Facial Embedding — ArcFace (DeepFace)
+
+**File:** `python/face_utils/qdrant_store.py`
+
+#### Why ArcFace?
+ArcFace achieves **99.83% accuracy on LFW benchmark**, the highest of any open-source model.
+It uses Additive Angular Margin Loss during training, creating highly discriminative 512-dimensional vectors where the cosine distance between embeddings of the same person is minimized.
+
+#### Extraction Process
+```python
+result = DeepFace.represent(
+    img_path=cv2_image,
+    model_name="ArcFace",       # non-negotiable
+    detector_backend="opencv",  # fastest detector
+    enforce_detection=True,     # return error if no face
+)
+embedding = result[0]["embedding"]  # list of 512 floats
+```
+
+#### First-Run Download
+DeepFace automatically downloads `arcface_weights.h5` (~500MB) on first call:
+```
+~/.deepface/weights/arcface_weights.h5
+```
+
+---
+
+### 8.4 Identity Deduplication (Qdrant)
+
+**File:** `python/face_utils/qdrant_store.py`
+
+#### Collection Configuration
+```
+Collection name : hirex_faces
+Vector size     : 512
+Distance metric : Cosine
+HNSW ef         : 128 (search precision)
+```
+
+#### Deduplication Query
+```python
+results = qdrant.search(
+    collection_name="hirex_faces",
+    query_vector=new_embedding,   # 512-dim vector
+    limit=1,                      # only need the nearest neighbor
+    search_params=SearchParams(hnsw_ef=128),
+)
+
+if results[0].score >= COSINE_THRESHOLD:  # default 0.60
+    return {"is_duplicate": True, ...}
+```
+
+#### What Happens on Match
+- **Score ≥ 0.60** (same person) → HTTP 409 Conflict → signup blocked
+- **Score < 0.60** (different person) → embedding stored → signup continues
+
+---
+
+## 9. API Reference
+
+### 9.1 Express Backend Endpoints
+
+**Base URL:** `http://localhost:5000`
+
+---
+
+#### `POST /api/auth/signup`
+
+Register a new user with biometric verification.
+
+**Request Body:**
+```json
+{
+  "name": "Jane Smith",
+  "email": "jane@example.com",
+  "password": "securepassword123",
+  "role": "candidate",
+  "faceImage": "<base64 JPEG string, no data-url prefix>"
+}
+```
+
+**Success Response `200`:**
+```json
+{
+  "message": "OTP sent to your email. Please verify to complete signup."
+}
+```
+
+**Error Responses:**
+| Status | Reason |
+|---|---|
+| `400` | Missing required fields |
+| `403` | Liveness check failed (spoof detected) |
+| `409` | Email already registered |
+| `409` | Face already registered (duplicate detection) |
+| `422` | No face detected in image |
+| `500` | Internal error |
+
+---
+
+#### `POST /api/auth/verify-otp`
+
+Confirm OTP and create the verified user account.
+
+**Request Body:**
+```json
+{
+  "email": "jane@example.com",
+  "otp": "483921"
+}
+```
+
+**Success Response `201`:**
+```json
+{
+  "message": "Account created successfully!",
+  "token": "<JWT>",
+  "user": {
+    "id": "...",
+    "name": "Jane Smith",
+    "email": "jane@example.com",
+    "role": "candidate"
+  }
+}
+```
+
+**Error Responses:**
+| Status | Reason |
+|---|---|
+| `400` | Invalid OTP |
+| `400` | OTP expired (> 10 minutes) |
+| `404` | No pending signup (expired or never started) |
+
+---
+
+#### `POST /api/auth/login`
+
+Authenticate with email and password.
+
+**Request Body:**
+```json
+{
+  "email": "jane@example.com",
+  "password": "securepassword123"
+}
+```
+
+**Success Response `200`:**
+```json
+{
+  "message": "Login successful",
+  "token": "<JWT>",
+  "user": { "id": "...", "name": "...", "email": "...", "role": "..." }
+}
+```
+
+---
+
+#### `GET /api/auth/me`
+
+Get current authenticated user. Requires `Authorization: Bearer <token>` header.
+
+**Success Response `200`:**
+```json
+{
+  "user": {
+    "name": "Jane Smith",
+    "email": "jane@example.com",
+    "role": "candidate",
+    "isVerified": true,
+    "createdAt": "2026-04-18T..."
+  }
+}
+```
+
+---
+
+#### `POST /api/auth/logout`
+
+Clear session cookie.
+
+**Response `200`:**
+```json
+{ "message": "Logged out successfully." }
+```
+
+---
+
+### 9.2 Python FastAPI Endpoints
+
+**Base URL:** `http://localhost:8000`
+**Interactive Docs:** `http://localhost:8000/docs`
+
+---
+
+#### `POST /verify-liveness`
+
+Run anti-spoofing check on a face image.
+
+**Request:**
+```json
+{ "image": "<base64 JPEG>" }
+```
+
+**Response `200`:**
+```json
+{
+  "is_live": true,
+  "confidence": 0.87,
+  "message": "Live"
+}
+```
+
+**Response `403` (spoof detected):**
+```json
+{
+  "detail": {
+    "is_live": false,
+    "confidence": 0.12,
+    "message": "Spoof detected (low texture)"
+  }
+}
+```
+
+---
+
+#### `POST /extract-embedding`
+
+Extract 512-dimensional ArcFace embedding.
+
+**Request:**
+```json
+{ "image": "<base64 JPEG>" }
+```
+
+**Response `200`:**
+```json
+{
+  "embedding": [0.023, -0.451, 0.187, ...],  // 512 floats
+  "face_detected": true
+}
+```
+
+---
+
+#### `POST /check-duplicate`
+
+Search Qdrant for a face match.
+
+**Request:**
+```json
+{ "embedding": [0.023, -0.451, ...] }  // 512 floats
+```
+
+**Response `200`:**
+```json
+{
+  "is_duplicate": false,
+  "score": 0.32,
+  "matched_point_id": null,
+  "message": "No duplicate found"
+}
+```
+
+---
+
+#### `POST /store-embedding`
+
+Insert a face embedding into Qdrant.
+
+**Request:**
+```json
+{
+  "embedding": [0.023, -0.451, ...],
+  "user_id": "pending_abc123",
+  "email": "jane@example.com"
+}
+```
+
+**Response `200`:**
+```json
+{
+  "point_id": "550e8400-e29b-41d4-a716-446655440000",
+  "success": true
+}
+```
+
+---
+
+## 10. Database Schemas
+
+### 10.1 MongoDB — User
+
+Collection: `users`
+
+```typescript
+{
+  name          : String    // required
+  email         : String    // required, unique, lowercase
+  passwordHash  : String    // bcrypt(12 rounds)
+  role          : "candidate" | "recruiter" | "admin"
+  facePointId   : String    // UUID of the Qdrant point (or null)
+  isVerified    : Boolean   // true only after OTP confirmed
+  createdAt     : Date      // auto
+  updatedAt     : Date      // auto
+}
+```
+
+---
+
+### 10.2 MongoDB — PendingUser
+
+Collection: `pendingusers`
+
+```typescript
+{
+  name                : String
+  email               : String  // unique
+  passwordHash        : String  // bcrypt hash
+  role                : "candidate" | "recruiter"
+  otp                 : String  // 6-digit code
+  otpExpiry           : Date    // createdAt + 10 minutes
+  faceEmbeddingStored : Boolean // true if Qdrant write succeeded
+  tempQdrantPointId   : String  // staging point ID in Qdrant
+
+  // TTL index: auto-deletes document 15 minutes after creation
+  createdAt           : Date
+}
+```
+
+> The TTL index ensures no orphaned pending records remain if the user never verifies their OTP.
+> After 15 minutes, MongoDB deletes the document automatically.
+
+---
+
+### 10.3 Qdrant — Face Collection
+
+Collection: `hirex_faces`
+
+```
+Vector dimensions : 512
+Distance metric   : Cosine
+
+Point structure:
+{
+  id      : UUID string
+  vector  : [512 floats]    // ArcFace embedding
+  payload : {
+    user_id : string,       // MongoDB _id (or pending_<uuid> during signup)
+    email   : string        // for lookup / debugging
+  }
+}
+```
+
+---
+
+## 11. Frontend Pages
+
+| Route | File | Description |
+|---|---|---|
+| `/` | `routes/home.tsx` | Landing page with hero, features grid, CTA |
+| `/login` | `routes/login.tsx` | Email/password login form |
+| `/signup` | `routes/signup.tsx` | 3-step wizard: Details → Face → OTP |
+| `/dashboard` | `routes/dashboard.tsx` | Protected — redirects to `/login` without JWT |
+
+### Component: `FaceCapture.tsx`
+
+Used inside the signup page's Step 2.
+
+**Props:**
+```typescript
+interface Props {
+  onCaptured : (imageBase64: string) => void;  // called when challenge passes
+  onError    : (message: string) => void;       // camera / model errors
+}
+```
+
+**Internal States:**
+- `loading` — MediaPipe model downloading from CDN
+- `ready` — model loaded, camera NOT yet started
+- `detecting` — camera active, running challenge detection loop
+- `done` — challenge passed, frame captured and sent
+
+---
+
+## 12. Security Design
+
+| Concern | Solution |
+|---|---|
+| **One email per account** | MongoDB `unique` index on `email` field |
+| **One face per account** | Qdrant cosine similarity search with threshold 0.60 |
+| **Fake photos / replays** | MiniFASNet anti-spoofing before embedding extraction |
+| **Passive spoofing** | MediaPipe active liveness challenge (blink, head-turn) |
+| **Password storage** | bcryptjs with 12 salt rounds (cost factor) |
+| **Session management** | Short-lived JWT (`7d` by default, configurable) |
+| **Payload size** | Express body limit set to `10mb` to accept base64 images |
+| **CORS** | Restricted to `FRONTEND_URL` only |
+| **Pending cleanup** | MongoDB TTL index auto-deletes unverified signups after 15 min |
+| **OTP expiry** | OTP invalid after 10 minutes |
+
+---
+
+## 13. Threshold Tuning — ArcFace Cosine Similarity
+
+The `COSINE_THRESHOLD` in `python/.env` controls how strict the deduplication is.
+
+```
+Cosine Similarity Range:
+  0.0  → completely different people
+  0.60 → default threshold (recommended for ArcFace)
+  1.0  → identical embedding (same image)
+```
+
+### Trade-offs
+
+| Threshold | False Accept Rate (FAR) | False Reject Rate (FRR) | Use Case |
+|---|---|---|---|
+| `0.50` | Higher (looser) | Lower | More permissive; some dupes may pass |
+| **`0.60`** | **Balanced** | **Balanced** | **Default — recommended** |
+| `0.70` | Lower (stricter) | Higher | High-security; may reject twins |
+| `0.80` | Very low | Very high | Overkill — too many false rejects |
+
+### Calibration Steps
+1. Collect a test set of 100 "same person" pairs and 100 "different person" pairs
+2. Run embeddings through DeepFace ArcFace
+3. Plot the score distribution — the decision boundary typically falls between 0.55–0.65
+4. Choose threshold that minimizes `FAR × FRR` for your use case
+
+---
+
+## 14. Development Notes & Gotchas
+
+### MediaPipe CDN vs NPM
+The `FaceCapture.tsx` component loads the face landmarker model from CDN:
+```
+https://storage.googleapis.com/mediapipe-models/...
+```
+This happens on first render (one-time download to browser cache). Ensure the user has internet access during development.
+
+### DeepFace First Run
+The first call to `/extract-embedding` will take **60–120 seconds** while downloading:
+```
+~/.deepface/weights/arcface_weights.h5  (~500MB)
+```
+Subsequent calls are fast (~0.5–2s depending on hardware).
+
+### MiniFASNet in Dev Mode
+If `python/models/silent_face/` doesn't exist, the liveness check falls back to a Laplacian blur-score heuristic and logs:
+```
+[liveness] Model load failed. Running in dev mode (always live).
+```
+For production, ensure the model weights are downloaded by calling `/verify-liveness` once on startup, or pre-downloading them.
+
+### CORS in Development
+Express is configured to allow `http://localhost:5173` (Vite/Remix dev server).
+If you change the frontend port, update `FRONTEND_URL` in `backend/.env`.
+
+### Base64 Image Format
+The frontend strips the `data:image/jpeg;base64,` prefix before sending.
+Express and FastAPI both expect raw base64 strings (no prefix).
+
+### MongoDB TTL Index
+The `PendingUser` collection has a TTL index with `expireAfterSeconds: 900` (15 minutes).
+MongoDB's TTL cleanup task runs every **60 seconds**, so documents may persist up to 16 minutes.
+
+### PowerShell `&&` Separator
+On Windows PowerShell, use `;` to chain commands, not `&&`:
+```powershell
+# Correct:
+npm install express; npm install -D @types/express
+
+# Wrong (fails in PowerShell):
+npm install express && npm install -D @types/express
+```
+
+---
+
+## 15. Quick Start Cheatsheet
+
+```powershell
+# Terminal 1 — Frontend
+cd F:\DevClash_HireX\frontend
+npm run dev
+# → http://localhost:5173
+
+# Terminal 2 — Express Backend
+cd F:\DevClash_HireX\backend
+# Edit .env with your MongoDB URI, JWT secret, SMTP creds, FastAPI URL
+npm run dev
+# → http://localhost:5000
+
+# Terminal 3 — Python ML Service
+cd F:\DevClash_HireX\python
+.\venv\Scripts\Activate.ps1
+# Edit .env with your Qdrant URL + API key
+uvicorn main:app --reload --port 8000
+# → http://localhost:8000
+# → http://localhost:8000/docs  (interactive Swagger UI)
+```
+
+### Ports at a Glance
+
+| Service | Port | URL |
+|---|---|---|
+| Frontend | 5173 | http://localhost:5173 |
+| Express Backend | 5000 | http://localhost:5000 |
+| Python FastAPI | 8000 | http://localhost:8000 |
+| FastAPI Docs | 8000 | http://localhost:8000/docs |
+| MongoDB | 27017 | mongodb://localhost:27017/hirex |
+| Qdrant Cloud | — | https://your-cluster.cloud.qdrant.io:6333 |
+
+---
+
+*HireX — Built for secure, verified, AI-assisted hiring.*

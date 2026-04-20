@@ -1,0 +1,68 @@
+version: "3.8"
+
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: hirex_qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"   # REST API  → http://localhost:6333
+      - "6334:6334"   # gRPC API  → localhost:6334
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    environment:
+      - QDRANT__LOG_LEVEL=INFO
+
+  redis:
+    image: redis:alpine
+    container_name: hirex_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  mongodb:
+    image: mongo:latest
+    container_name: hirex_mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+
+  backend:
+    image: kartikkumbhar150/hirex_backend:latest
+    build:
+      context: ./backend
+    container_name: hirex_backend
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    depends_on:
+      - mongodb
+      - python
+      - redis
+    env_file:
+      - ./backend/.env
+
+  python:
+    image: kartikkumbhar150/hirex_python:latest
+    build:
+      context: ./python
+    container_name: hirex_python
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    depends_on:
+      - qdrant
+    env_file:
+      - ./python/.env
+
+volumes:
+  qdrant_storage:
+    driver: local
+  mongodb_data:
+    driver: local
+  redis_data:
+    driver: local

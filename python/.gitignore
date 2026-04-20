@@ -1,0 +1,6 @@
+.env
+face_utils/__pycache__
+__pycache__
+qdrant_data/
+models/
+test_qdrant.py

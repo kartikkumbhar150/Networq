@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+deepface
+tf-keras
+qdrant-client
+opencv-python-headless
+Pillow
+numpy
+requests
+torch
+torchvision

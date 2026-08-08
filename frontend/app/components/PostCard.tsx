@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router";
 import { Globe, Calendar, MapPin, ThumbsUp, MessageSquare, Repeat, Send } from "lucide-react";
 
-const API = "http://13.206.69.62:5000";
+const API = "http://localhost:5000";
 
 interface PostProps {
   post: any;
@@ -144,10 +144,19 @@ export default function PostCard({ post, currentUserId, onLike, onComment, onDel
       <div style={{ padding: "14px 20px 16px" }}>
         <p style={{
           color: "var(--text-primary)", fontSize: 14, lineHeight: 1.65,
-          whiteSpace: "pre-wrap", wordBreak: "break-word"
+          whiteSpace: "pre-wrap", wordBreak: "break-word", marginBottom: post.media?.length ? 12 : 0
         }}>
           {post.content}
         </p>
+        
+        {post.media && post.media.length > 0 && (
+          <div style={{ 
+            marginTop: 12, borderRadius: "12px", overflow: "hidden", 
+            border: "1px solid var(--border)", background: "var(--bg-base)"
+          }}>
+            <img src={post.media[0]} alt="Post media" style={{ width: "100%", height: "auto", display: "block", objectFit: "cover", maxHeight: "500px" }} />
+          </div>
+        )}
       </div>
 
       {/* ─── Attached Event Mini-Card ─── */}

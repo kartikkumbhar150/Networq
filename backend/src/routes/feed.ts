@@ -53,32 +53,52 @@ router.get('/posts', async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const currentUserId = req.query.userId === 'current' ? req.userId! : req.query.userId as string;
     const authorIdFilter = req.query.authorId as string;
-    
-    let allowList: string[] = [];
+
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 10;
+    const skip = (page - 1) * limit;
+
+    let posts;
 
     if (authorIdFilter) {
       // Direct user wall fetch
-      allowList = [authorIdFilter];
+      posts = await Post.find({ authorId: authorIdFilter })
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .populate('attachedEventId');
     } else {
-      // Connected feed fetch
-      allowList.push(currentUserId);
+      // Build connection allow-list
+      const allowList: string[] = [currentUserId];
       const connections = await Connection.find({
         $or: [{ requesterId: currentUserId }, { receiverId: currentUserId }],
         status: 'accepted',
       });
       const friendIds = connections.map(c => c.requesterId === currentUserId ? c.receiverId : c.requesterId);
       allowList.push(...friendIds);
+
+      // Fetch connection posts first
+      posts = await Post.find({ authorId: { $in: allowList } })
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .populate('attachedEventId');
+
+      // If not enough posts from connections, fill with public/global posts
+      if (posts.length < limit) {
+        const existingIds = posts.map(p => p._id);
+        const remaining = limit - posts.length;
+        const publicPosts = await Post.find({
+          _id: { $nin: existingIds },
+          authorId: { $nin: allowList }
+        })
+          .sort({ createdAt: -1 })
+          .skip(skip > 0 ? Math.max(0, skip - posts.length) : 0)
+          .limit(remaining)
+          .populate('attachedEventId');
+        posts = [...posts, ...publicPosts];
+      }
     }
-
-    const page = parseInt(req.query.page as string) || 1;
-    const limit = parseInt(req.query.limit as string) || 10;
-    const skip = (page - 1) * limit;
-
-    const posts = await Post.find({ authorId: { $in: allowList } })
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit)
-      .populate('attachedEventId'); // Auto pull event info
 
     res.json({ success: true, posts, currentPage: page });
   } catch (err) {

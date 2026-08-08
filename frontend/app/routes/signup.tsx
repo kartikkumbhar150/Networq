@@ -10,7 +10,7 @@ export function meta() {
   ];
 }
 
-const API = "http://13.206.69.62:5000";
+const API = "http://localhost:5000";
 type Step = "details" | "face" | "otp" | "digilocker" | "done";
 
 export default function Signup() {

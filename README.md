@@ -1,3 +1,5 @@
+Team name : NewBies
+
 # HireX (DevClash_HireX)
 
 HireX is a full-stack professional networking and hiring platform that combines:

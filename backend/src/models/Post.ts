@@ -5,6 +5,7 @@ export interface IPost extends Document {
   authorName: string;
   authorAvatar?: string;
   content: string;
+  media?: string[];
   type: 'text' | 'event_share' | 'achievement';
   attachedEventId?: mongoose.Types.ObjectId;
   likes: { userId: string; likedAt: Date }[];
@@ -28,6 +29,7 @@ const postSchema = new Schema<IPost>(
     authorName: { type: String, required: true },
     authorAvatar: { type: String },
     content: { type: String, required: true, maxlength: 2000 },
+    media: [{ type: String }],
     type: { type: String, enum: ['text', 'event_share', 'achievement'], default: 'text' },
     attachedEventId: { type: Schema.Types.ObjectId, ref: 'Event' },
     likes: [

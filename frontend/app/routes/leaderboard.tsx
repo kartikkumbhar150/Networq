@@ -6,7 +6,7 @@ export function meta() {
   return [{ title: "Leaderboard – HireX" }];
 }
 
-const API = "http://13.206.69.62:5000";
+const API = "http://localhost:5000";
 
 export default function Leaderboard() {
   const [data, setData] = useState<any>(null);

@@ -45,7 +45,14 @@ export async function sendOTPEmail(toEmail: string, name: string, otp: string): 
     </div>
     <p style="color:#64748b;font-size:13px;text-align:center;">Expires in <strong style="color:#94a3b8;">10 minutes</strong>.</p>
   `);
-  await transporter.sendMail({ from: `"HireX" <${process.env.FROM_EMAIL}>`, to: toEmail, subject: 'Your HireX Verification Code', html });
+  
+  console.log(`\n=========================================\n[DEV] MOCK OTP for ${toEmail}: ${otp}\n=========================================\n`);
+  
+  try {
+    await transporter.sendMail({ from: `"HireX" <${process.env.FROM_EMAIL}>`, to: toEmail, subject: 'Your HireX Verification Code', html });
+  } catch (error) {
+    console.error(`[Email Service] Failed to send OTP to ${toEmail}. OTP was: ${otp}`);
+  }
 }
 
 // ─── Event Ticket (QR) ────────────────────────────────────────────────────────

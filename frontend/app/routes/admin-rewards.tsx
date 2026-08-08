@@ -5,7 +5,7 @@ export function meta() {
   return [{ title: "Admin Rewards – HireX" }];
 }
 
-const API = "http://13.206.69.62:5000";
+const API = "http://localhost:5000";
 
 export default function AdminRewards() {
   const [logs, setLogs] = useState<any[]>([]);

@@ -15,7 +15,7 @@ export function meta() {
   ];
 }
 
-const API = "http://13.206.69.62:5000";
+const API = "http://localhost:5000";
 const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 const YEARS = Array.from({length: 50}, (_, i) => new Date().getFullYear() - i);
 const EMP_TYPES = ["Full-time","Part-time","Self-employed","Freelance","Contract","Internship","Apprenticeship","Seasonal"];

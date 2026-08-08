@@ -21,7 +21,7 @@ export default function Sidebar() {
 
       const fetchUnread = async () => {
         try {
-          const res = await fetch(`http://13.206.69.62:5000/api/chat/unread/${parsed.id}`, { headers: { "Authorization": `Bearer ${localStorage.getItem("token")}` } });
+          const res = await fetch(`http://localhost:5000/api/chat/unread/${parsed.id}`, { headers: { "Authorization": `Bearer ${localStorage.getItem("token")}` } });
           const data = await res.json();
           if (data.success) setTotalUnread(data.totalUnread);
         } catch (e) {}
@@ -29,7 +29,7 @@ export default function Sidebar() {
 
       const fetchProfile = async () => {
         try {
-          const res = await fetch(`http://13.206.69.62:5000/api/users/${parsed.id}/profile`, { headers: { "Authorization": `Bearer ${localStorage.getItem("token")}` } });
+          const res = await fetch(`http://localhost:5000/api/users/${parsed.id}/profile`, { headers: { "Authorization": `Bearer ${localStorage.getItem("token")}` } });
           const data = await res.json();
           if (data.success) setProfileData(data.user);
         } catch (e) {}

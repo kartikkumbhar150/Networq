@@ -6,7 +6,7 @@ import {
   Globe, HeartHandshake, BookOpen, MapPin, ExternalLink, Camera, MessageSquare, CheckCircle2
 } from "lucide-react";
 
-const API = "http://13.206.69.62:5000";
+const API = "http://localhost:5000";
 const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
 export default function UserProfile() {

@@ -11,7 +11,7 @@ export function meta() {
   ];
 }
 
-const API = "http://13.206.69.62:5000";
+const API = "http://localhost:5000";
 
 function useDebounce(value: string, delay: number) {
   const [debouncedValue, setDebouncedValue] = useState(value);

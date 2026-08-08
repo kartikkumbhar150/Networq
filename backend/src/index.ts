@@ -6,7 +6,7 @@ import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import session from 'express-session';
 import passport from './utils/passport';
-import mongoose from 'mongoose';
+import prisma from './db/prisma';
 import dns from 'dns';
 import authRoutes from './routes/auth';
 import opportunitiesRoutes from './routes/opportunities';
@@ -84,14 +84,13 @@ app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', service: 'HireX Express Backend', timestamp: new Date() });
 });
 
-// ─── MongoDB Connection & Init ───────────────────────────────────────────────
+// ─── DB Connection ───────────────────────────────────────────────
 async function connectDB() {
   try {
-    await mongoose.connect(process.env.MONGODB_URI!);
-    console.log('[db]: MongoDB connected');
-    await initDatabase(); // Creates collections and indexes automatically
+    await prisma.$connect();
+    console.log('[db]: PostgreSQL connected via Prisma');
   } catch (err) {
-    console.error('[db]: MongoDB connection error', err);
+    console.error('[db]: Database connection error', err);
     process.exit(1);
   }
 }
@@ -125,7 +124,7 @@ connectDB().then(async () => {
     wss.clients.forEach(client => client.terminate());
     server.closeAllConnections?.(); // Node 18.2+ — force kill keep-alive sockets
     server.close(() => {
-      mongoose.connection.close().then(() => {
+      prisma.$disconnect().then(() => {
         console.log('[server]: Clean exit.');
         process.exit(0);
       });

@@ -2,7 +2,7 @@ import passport from 'passport';
 import { Strategy as GoogleStrategy } from 'passport-google-oauth20';
 import { Strategy as GitHubStrategy } from 'passport-github2';
 import { v4 as uuidv4 } from 'uuid';
-import User from '../models/User';
+import prisma from '../db/prisma';
 
 // Shared function to handle OAuth login/signup
 async function handleOAuthUser(
@@ -11,29 +11,34 @@ async function handleOAuthUser(
   email: string,
   name: string
 ) {
-  let user = await User.findOne({ email: email.toLowerCase() });
+  let user = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
 
   if (user) {
     // If a user exists but doesn't have OAuth fields set, we can link them
     if (user.authProvider !== provider && !user.providerId) {
-      user.authProvider = provider;
-      user.providerId = providerId;
-      // Mark verified since OAuth providers verify emails
-      user.isVerified = true; 
-      await user.save();
+      user = await prisma.user.update({
+        where: { id: user.id },
+        data: {
+          authProvider: provider,
+          providerId: providerId,
+          isVerified: true
+        }
+      });
     }
   } else {
     // Create new user
     const newRefCode = uuidv4().replace(/-/g, '').substring(0, 8).toUpperCase();
-    user = await User.create({
-      name,
-      email: email.toLowerCase(),
-      authProvider: provider,
-      providerId,
-      facePointId: null, // Bypass face check
-      isVerified: true,  // Bypass email OTP check
-      referralCode: newRefCode,
-      accountType: 'user', // Default to User instead of Company
+    user = await prisma.user.create({
+      data: {
+        name,
+        email: email.toLowerCase(),
+        authProvider: provider,
+        providerId,
+        facePointId: null, // Bypass face check
+        isVerified: true,  // Bypass email OTP check
+        referralCode: newRefCode,
+        accountType: 'user', // Default to User instead of Company
+      }
     });
   }
   return user;
@@ -94,7 +99,7 @@ passport.serializeUser((user: any, done) => {
 
 passport.deserializeUser(async (id, done) => {
   try {
-    const user = await User.findById(id);
+    const user = await prisma.user.findUnique({ where: { id: id as string } });
     done(null, user);
   } catch (err) {
     done(err, null);

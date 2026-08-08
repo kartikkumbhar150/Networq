@@ -1,8 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
-import User from '../models/User';
-import Connection from '../models/Connection';
-import Post from '../models/Post';
+import prisma from '../db/prisma';
 
 const router = Router();
 
@@ -14,24 +12,30 @@ router.get('/search', async (req: AuthRequest, res: Response): Promise<void> => 
     const { query } = req.query;
     const currentUserId = req.userId!;
 
-    const searchCriteria: any = { _id: { $ne: currentUserId } };
+    const searchCriteria: any = { id: { not: currentUserId } };
 
     if (query) {
-      searchCriteria.$or = [
-        { name: { $regex: query, $options: 'i' } },
-        { email: { $regex: query, $options: 'i' } },
+      searchCriteria.OR = [
+        { name: { contains: query as string, mode: 'insensitive' } },
+        { email: { contains: query as string, mode: 'insensitive' } },
       ];
     }
 
-    const users = await User.find(searchCriteria).limit(20).select('name email accountType profile');
+    const users = await prisma.user.findMany({
+      where: searchCriteria,
+      take: 20,
+      select: { id: true, name: true, email: true, accountType: true, profile: true },
+    });
 
     // Fetch all relevant connections in ONE query to avoid N+1 problem
-    const userIds = users.map(u => u._id.toString());
-    const connections = await Connection.find({
-      $or: [
-        { requesterId: currentUserId, receiverId: { $in: userIds } },
-        { requesterId: { $in: userIds }, receiverId: currentUserId },
-      ],
+    const userIds = users.map((u: any) => u.id);
+    const connections = await prisma.connection.findMany({
+      where: {
+        OR: [
+          { requesterId: currentUserId, receiverId: { in: userIds } },
+          { requesterId: { in: userIds }, receiverId: currentUserId },
+        ],
+      },
     });
 
     const connectionMap = new Map();
@@ -40,8 +44,8 @@ router.get('/search', async (req: AuthRequest, res: Response): Promise<void> => 
       connectionMap.set(otherId, c);
     }
 
-    const mappedUsers = users.map((u) => {
-      const connection = connectionMap.get(u._id.toString());
+    const mappedUsers = users.map((u: any) => {
+      const connection = connectionMap.get(u.id);
 
       // Determine connection status explicitly from currentUserId's perspective
       let connectionStatus = 'none';
@@ -52,14 +56,14 @@ router.get('/search', async (req: AuthRequest, res: Response): Promise<void> => 
       }
 
       return {
-        userId: u._id,
+        userId: u.id,
         name: u.name,
         email: u.email,
         role: u.accountType,
-        avatar: u.profile?.profilePhoto,
+        avatar: (u.profile as any)?.profilePhoto,
         connectionStatus,
         connectionDirection,
-        connectionId: connection?._id || null,
+        connectionId: connection?.id || null,
       };
     });
 
@@ -72,19 +76,30 @@ router.get('/search', async (req: AuthRequest, res: Response): Promise<void> => 
 // ─── GET /api/users/:userId/profile ──────────────────────────────────────────
 router.get('/:userId/profile', async (req: Request, res: Response): Promise<void> => {
   try {
-    const user = await User.findById(req.params.userId).select('-passwordHash -facePointId');
+    const user = await prisma.user.findUnique({
+      where: { id: req.params.userId },
+      select: {
+        id: true, name: true, email: true, authProvider: true, providerId: true,
+        accountType: true, companyName: true, cin: true, gstin: true,
+        isVerifiedCompany: true, isVerified: true, profile: true, interests: true,
+        referralCode: true, referredBy: true, referralCount: true, verifiedReferralCount: true,
+        promoCredits: true, milestoneBadges: true, createdAt: true, updatedAt: true
+      }
+    });
     if (!user) { res.status(404).json({ message: 'User not found.' }); return; }
 
-    const postCount = await Post.countDocuments({ authorId: req.params.userId });
-    const connectionCount = await Connection.countDocuments({
-      $or: [{ requesterId: req.params.userId }, { receiverId: req.params.userId }],
-      status: 'accepted',
+    const postCount = await prisma.post.count({ where: { authorId: req.params.userId } });
+    const connectionCount = await prisma.connection.count({
+      where: {
+        OR: [{ requesterId: req.params.userId }, { receiverId: req.params.userId }],
+        status: 'accepted',
+      },
     });
 
     res.json({
       success: true,
       user: {
-        ...user.toObject(),
+        ...user,
         postCount,
         connectionCount,
       },

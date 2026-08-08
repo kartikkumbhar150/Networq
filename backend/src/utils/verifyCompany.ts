@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import csvParser from 'csv-parser';
-import User from '../models/User';
+import prisma from '../db/prisma';
 
 interface CsvRow {
   CompanyName: string;
@@ -14,13 +14,13 @@ interface CsvRow {
 
 export async function verifyCompanyBackground(userId: string) {
   try {
-    const user = await User.findById(userId);
+    const user = await prisma.user.findUnique({ where: { id: userId } });
     if (!user || user.accountType !== 'company') return;
     if (user.isVerifiedCompany) return; // already verified
 
     const emailDomain = user.email.split('@')[1]?.toLowerCase();
-    const cin = user.companyDetails?.cin?.trim().toUpperCase();
-    const gstin = user.companyDetails?.gstin?.trim().toUpperCase();
+    const cin = user.cin?.trim().toUpperCase();
+    const gstin = user.gstin?.trim().toUpperCase();
 
     // Read the CSV asynchronously
     const results: CsvRow[] = [];
@@ -49,7 +49,7 @@ export async function verifyCompanyBackground(userId: string) {
         }
 
         if (isMatch) {
-          await User.findByIdAndUpdate(userId, { isVerifiedCompany: true });
+          await prisma.user.update({ where: { id: userId }, data: { isVerifiedCompany: true } });
           console.log(`[auth]: Company Verification SUCCESS for ${user.email}`);
         } else {
           console.log(`[auth]: Company Verification FAILED for ${user.email}`);

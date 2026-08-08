@@ -15,7 +15,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "@prisma/client": "^7.9.1",
+    "@prisma/client": "5.22.0",
     "axios": "^1.15.0",
     "bcryptjs": "^3.0.3",
     "cookie-parser": "^1.4.7",
@@ -51,7 +51,7 @@
     "@types/uuid": "^9.0.0",
     "@types/ws": "^8.18.1",
     "nodemon": "^3.1.14",
-    "prisma": "^7.9.1",
+    "prisma": "5.22.0",
     "ts-node": "^10.9.2",
     "typescript": "^6.0.3"
   }

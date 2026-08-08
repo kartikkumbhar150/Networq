@@ -22,14 +22,7 @@ services:
     volumes:
       - redis_data:/data
 
-  mongodb:
-    image: mongo:latest
-    container_name: hirex_mongodb
-    restart: unless-stopped
-    ports:
-      - "27017:27017"
-    volumes:
-      - mongodb_data:/data/db
+
 
   backend:
     image: kartikkumbhar150/hirex_backend:latest
@@ -40,7 +33,6 @@ services:
     ports:
       - "5000:5000"
     depends_on:
-      - mongodb
       - python
       - redis
     env_file:
@@ -61,8 +53,6 @@ services:
 
 volumes:
   qdrant_storage:
-    driver: local
-  mongodb_data:
     driver: local
   redis_data:
     driver: local

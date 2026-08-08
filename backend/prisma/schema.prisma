@@ -1,0 +1,315 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                    String    @id @default(uuid())
+  name                  String
+  email                 String    @unique
+  passwordHash          String?
+  authProvider          String    @default("local") // local, google, github
+  providerId            String?
+  accountType           String    @default("user") // user, company
+  
+  companyName           String?
+  cin                   String?
+  gstin                 String?
+
+  isVerifiedCompany     Boolean   @default(false)
+  facePointId           String?
+  isVerified            Boolean   @default(false)
+  profile               Json      @default("{}") // Store profile object here to avoid massive relations
+  interests             String[]  @default([])
+  
+  // Referral & Rewards
+  referralCode          String?   @unique
+  referredBy            String?
+  referralCount         Int       @default(0)
+  verifiedReferralCount Int       @default(0)
+  hasReached1000MilestoneAt DateTime?
+  promoCredits          Int       @default(0)
+  milestoneBadges       String[]  @default([])
+  boostedUntil          DateTime?
+
+  // DigiLocker
+  isDigilockerVerified  Boolean   @default(false)
+  digilockerData        Json?
+
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+}
+
+model Post {
+  id              String    @id @default(uuid())
+  authorId        String
+  authorName      String
+  authorAvatar    String?
+  content         String
+  media           String[]  @default([])
+  type            String    @default("text") // text, event_share, achievement
+  attachedEventId String?
+  
+  likes           Json[]    @default([])
+  likeCount       Int       @default(0)
+  
+  comments        Json[]    @default([])
+  commentCount    Int       @default(0)
+  
+  boostedUntil    DateTime?
+  
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+}
+
+model Connection {
+  id              String    @id @default(uuid())
+  requesterId     String
+  requesterName   String
+  requesterAvatar String?
+  receiverId      String
+  receiverName    String
+  receiverAvatar  String?
+  status          String    @default("pending") // pending, accepted, rejected, withdrawn
+
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  @@index([requesterId, receiverId])
+}
+
+model Message {
+  id              String    @id @default(uuid())
+  conversationId  String
+  senderId        String
+  senderName      String
+  senderAvatar    String?
+  receiverId      String
+  content         String
+  media           String[]  @default([])
+  type            String    @default("text") // text, system, direct_message, call
+  isSystemMessage Boolean   @default(false)
+  attachedEventId String?
+
+  readBy          String[]  @default([])
+  
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+}
+
+model Application {
+  id                  String    @id @default(uuid())
+  opportunityId       String
+  applicantId         String
+  
+  bidAmount           Float?
+  proposalText        String
+  ndaSignedAt         DateTime?
+
+  milestoneAgreements Json[]    @default([])
+  escrowStatus        String?   // pending, funded, released, disputed
+
+  status              String    @default("pending") // pending, accepted, rejected, in_progress
+
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  
+  @@unique([opportunityId, applicantId])
+}
+
+model CompanyRepresentative {
+  id                    String    @id @default(uuid())
+  companyId             String
+  userId                String
+  representativeType    String    // founder, director, authorized_rep, employee
+  authorizationScope    String[]  @default([])
+  verificationStatus    String    @default("pending_verification") // pending_verification, verified, revoked
+  verifiedAt            DateTime?
+  verifiedBy            String?
+  bankAccountAuthorized Boolean   @default(false)
+  bankAccountDetails    String?
+  revokedReason         String?
+
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  
+  @@unique([companyId, userId])
+}
+
+model Conversation {
+  id               String    @id @default(uuid())
+  conversationId   String    @unique
+  participants     String[]  @default([])
+  participantNames Json?
+  
+  lastMessage      Json?
+  lastMessageAt    DateTime?
+  unreadCount      Json?
+
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+}
+
+model DirectCommunicationSession {
+  id                             String    @id @default(uuid())
+  investmentProposalId           String
+  companyId                      String
+  companyRepId                   String
+  investorId                     String
+  sessionType                    String    @default("platform_messaging") // platform_messaging, video_call
+  isActive                       Boolean   @default(true)
+  encryptedMessages              Json[]    @default([])
+  investorVerificationCheckpoint Json?
+
+  createdAt                      DateTime  @default(now())
+  updatedAt                      DateTime  @updatedAt
+  
+  @@unique([investmentProposalId, investorId])
+}
+
+model Event {
+  id                   String    @id @default(uuid())
+  title                String
+  description          String
+  venue                String
+  date                 DateTime
+  endDate              DateTime
+  capacity             Int
+  ticketPrice          Float
+  organizerId          String
+  status               String    @default("published") // published, ongoing, completed, cancelled, postponed, refunded
+  escrowAmount         Float     @default(0)
+  attendanceThreshold  Float     @default(70)
+  postponeProposedDate DateTime?
+  postponeDeadline     DateTime?
+  boostedUntil         DateTime?
+
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+}
+
+model InvestmentProposal {
+  id                            String    @id @default(uuid())
+  companyId                     String
+  createdBy                     String
+  proposalTitle                 String
+  description                   String
+  investmentAmount              Float
+  equityOffering                Float
+  investmentType                String    // equity, debt, convertible_note, safe
+  status                        String    @default("draft") // draft, active, owner_verified, investment_completed, frozen, cancelled
+  investorsInvolved             String[]  @default([])
+  creatorVerificationCheckpoint Boolean   @default(false)
+  bankAccountForInvestment      Json?
+  fraudFlags                    Json[]    @default([])
+  riskScore                     Float     @default(0)
+  isFrozen                      Boolean   @default(false)
+  frozenReason                  String?
+  auditTrail                    Json[]    @default([])
+
+  createdAt                     DateTime  @default(now())
+  updatedAt                     DateTime  @updatedAt
+  
+  @@index([companyId, status])
+}
+
+model Opportunity {
+  id                    String    @id @default(uuid())
+  companyId             String
+  isFromVerifiedCompany Boolean   @default(false)
+  
+  pillar                String    // capital, procurement, alliance
+  type                  String    // seed_funding, job, freelance, jv
+  title                 String
+  description           String
+  requirements          String[]  @default([])
+  status                String    @default("open") // open, negotiation, escrow, closed
+
+  // Capital
+  fundingAmount         Float?
+  equityOffered         Float?
+  valuation             Float?
+  dataRoomUrl           String?
+
+  // Procurement
+  budget                Float?
+  biddingType           String?   // fixed, milestone
+  milestones            Json[]    @default([])
+
+  // Alliance
+  allianceType          String?
+  synergyTags           String[]  @default([])
+
+  // Contact Info
+  contactEmail          String?
+  contactPhone          String?
+  isActive              Boolean   @default(true)
+
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  
+  @@index([createdAt(sort: Desc)])
+  @@index([pillar, type])
+}
+
+model PendingUser {
+  id                  String    @id @default(uuid())
+  name                String
+  email               String    @unique
+  passwordHash        String
+  accountType         String    @default("user") // user, company
+  companyDetails      Json?
+  otp                 String
+  otpExpiry           DateTime
+  faceEmbeddingStored Boolean   @default(false)
+  tempQdrantPointId   String?
+  enteredReferralCode String?
+
+  createdAt           DateTime  @default(now())
+}
+
+model ProfileRecommendation {
+  id              String    @id @default(uuid())
+  userId          String
+  recommendations Json[]    @default([])
+  profileScore    Float     @default(0)
+  scoreBreakdown  Json[]    @default([])
+  generatedAt     DateTime  @default(now())
+  expiresAt       DateTime
+}
+
+model Registration {
+  id               String    @id @default(uuid())
+  eventId          String
+  userId           String
+  qrToken          String?
+  entryQrToken     String    @unique
+  exitQrToken      String    @unique
+  status           String    @default("registered") // registered, check_in_sent, completed, refunded, cancelled
+  paymentStatus    String    @default("held") // held, released, refunded
+  amountPaid       Float
+  checkIn          DateTime?
+  checkOut         DateTime?
+  postponeResponse String    @default("pending") // pending, accepted, refund_requested
+
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  
+  @@unique([eventId, userId])
+}
+
+model Transaction {
+  id          String    @id @default(uuid())
+  userId      String
+  type        String    // referral, boost, topup, milestone
+  amount      Float
+  description String
+
+  createdAt   DateTime  @default(now())
+  
+  @@index([createdAt(sort: Desc)])
+}

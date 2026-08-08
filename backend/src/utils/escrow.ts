@@ -32,14 +32,14 @@ export async function settleEscrow(eventId: string): Promise<void> {
     }
 
     // Count full participants (both check-in AND check-out)
-    const fullAttendees = registrations.filter(r => r.checkIn && r.checkOut).length;
+    const fullAttendees = registrations.filter((r: any) => r.checkIn && r.checkOut).length;
     const attendancePct = (fullAttendees / total) * 100;
 
     console.log(`[escrow] Event ${event.title}: ${fullAttendees}/${total} full attendees (${attendancePct.toFixed(1)}%)`);
 
     if (attendancePct >= event.attendanceThreshold) {
       // ─── Release funds to organizer ───────────────────────────────────
-      const totalEscrow = registrations.reduce((sum, r) => sum + r.amountPaid, 0);
+      const totalEscrow = registrations.reduce((sum: number, r: any) => sum + r.amountPaid, 0);
 
       await prisma.registration.updateMany({
         where: { eventId, paymentStatus: 'held' },
@@ -65,7 +65,7 @@ export async function settleEscrow(eventId: string): Promise<void> {
         data: { status: 'refunded', escrowAmount: 0 }
       });
 
-      const userIds = registrations.map(r => r.userId);
+      const userIds = registrations.map((r: any) => r.userId);
       const users = await prisma.user.findMany({ where: { id: { in: userIds } } });
 
       for (const reg of registrations) {
@@ -73,7 +73,7 @@ export async function settleEscrow(eventId: string): Promise<void> {
           where: { id: reg.id },
           data: { paymentStatus: 'refunded', status: 'refunded' }
         });
-        const attendee = users.find(u => u.id === reg.userId);
+        const attendee = users.find((u: any) => u.id === reg.userId);
         if (attendee) {
           await sendRefundEmail(attendee.email, attendee.name, event.title, reg.amountPaid);
         }

@@ -18,11 +18,11 @@ import connectionRoutes from './routes/connections';
 import usersRoutes from './routes/users';
 import chatRoutes from './routes/chat';
 import rewardsRoutes from './routes/rewards';
-import investmentRoutes from './routes/investment';
-import adminInvestmentRoutes from './routes/adminInvestment';
-import aiRoutes from './routes/ai';
+// import investmentRoutes from './routes/investment';
+// import adminInvestmentRoutes from './routes/adminInvestment';
+// import aiRoutes from './routes/ai';
 import dashboardRoutes from './routes/dashboard';
-import { initDatabase } from './db/init';
+// import { initDatabase } from './db/init';
 import { initScheduler } from './utils/scheduler';
 import http from 'http';
 import { WebSocketServer } from 'ws';
@@ -36,7 +36,7 @@ dns.setDefaultResultOrder('ipv4first');
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// ─── Middleware ───────────────────────────────────────────────────────────────
+// --- Middleware ---------------------------------------------------------------
 app.use(cors({
   origin: process.env.FRONTEND_URL || 'http://localhost:5173',
   credentials: true,
@@ -53,7 +53,7 @@ app.use(
 app.use(passport.initialize());
 app.use(passport.session());
 
-// ─── Auto-Cache Invalidation ─────────────────────────────────────────────────
+// --- Auto-Cache Invalidation -------------------------------------------------
 app.use((req, res, next) => {
   res.on('finish', () => {
     // Whenever a mutation concludes successfully, wipe the global cache
@@ -64,7 +64,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// ─── Routes ──────────────────────────────────────────────────────────────────
+// --- Routes ------------------------------------------------------------------
 app.use('/api/auth', authRoutes);
 app.use('/api/opportunities', opportunitiesRoutes);
 app.use('/api/events', eventsRoutes);
@@ -75,16 +75,16 @@ app.use('/api/connections', connectionRoutes);
 app.use('/api/users', usersRoutes);
 app.use('/api/chat', chatRoutes);
 app.use('/api/rewards', rewardsRoutes);
-app.use('/api/investment', investmentRoutes);
-app.use('/api/admin', adminInvestmentRoutes);
-app.use('/api/ai', aiRoutes);
+// app.use('/api/investment', investmentRoutes);
+// app.use('/api/admin', adminInvestmentRoutes);
+// app.use('/api/ai', aiRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', service: 'HireX Express Backend', timestamp: new Date() });
 });
 
-// ─── DB Connection ───────────────────────────────────────────────
+// --- DB Connection -----------------------------------------------
 async function connectDB() {
   try {
     await prisma.$connect();
@@ -95,43 +95,49 @@ async function connectDB() {
   }
 }
 
-// ─── Start Server ─────────────────────────────────────────────────────────────
-connectDB().then(async () => {
-  await initScheduler(); // Re-schedule pending event settlements
-  const server = http.createServer(app);
-  const wss = new WebSocketServer({ server });
-  initChatWebSockets(wss);
+// --- Start Server -------------------------------------------------------------
+if (process.env.VERCEL) {
+  // In Vercel serverless environment, just connect DB and export the Express app
+  connectDB();
+  // Vercel Serverless does NOT support persistent WebSockets, so initChatWebSockets is skipped.
+} else {
+  // Local or standard Docker environment
+  connectDB().then(async () => {
+    await initScheduler(); // Re-schedule pending event settlements
+    const server = http.createServer(app);
+    const wss = new WebSocketServer({ server });
+    initChatWebSockets(wss);
 
-  server.on('error', (err: NodeJS.ErrnoException) => {
-    if (err.code === 'EADDRINUSE') {
-      console.error(`[server]: Port ${PORT} is already in use. Kill the old process and restart.`);
-      process.exit(1);
-    } else {
-      throw err;
-    }
-  });
-
-  server.listen(PORT, () => {
-    console.log(`[server]: HireX backend running at http://localhost:${PORT}`);
-    console.log(`[ws]: WebSocket chat server securely mounted`);
-  });
-
-  // Graceful shutdown — force-close all connections so the port is released
-  // immediately when nodemon restarts (avoids EADDRINUSE on hot-reload)
-  const shutdown = (signal: string) => {
-    console.log(`[server]: ${signal} received — shutting down...`);
-    // Destroy all active connections immediately (important for WebSockets)
-    wss.clients.forEach(client => client.terminate());
-    server.closeAllConnections?.(); // Node 18.2+ — force kill keep-alive sockets
-    server.close(() => {
-      prisma.$disconnect().then(() => {
-        console.log('[server]: Clean exit.');
-        process.exit(0);
-      });
+    server.on('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EADDRINUSE') {
+        console.error('[server]: Port ' + PORT + ' is already in use. Kill the old process and restart.');
+        process.exit(1);
+      } else {
+        throw err;
+      }
     });
-    // Hard kill after 3s as absolute fallback
-    setTimeout(() => process.exit(1), 3000).unref();
-  };
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
-  process.on('SIGINT',  () => shutdown('SIGINT'));
-});
+
+    server.listen(PORT, () => {
+      console.log('[server]: HireX backend running at http://localhost:' + PORT);
+      console.log('[ws]: WebSocket chat server securely mounted');
+    });
+
+    // Graceful shutdown
+    const shutdown = (signal: string) => {
+      console.log('[server]: ' + signal + ' received � shutting down...');
+      wss.clients.forEach(client => client.terminate());
+      server.closeAllConnections?.();
+      server.close(() => {
+        prisma.$disconnect().then(() => {
+          console.log('[server]: Clean exit.');
+          process.exit(0);
+        });
+      });
+      setTimeout(() => process.exit(1), 3000).unref();
+    };
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    process.on('SIGINT',  () => shutdown('SIGINT'));
+  });
+}
+
+export default app;

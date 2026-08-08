@@ -1,8 +1,6 @@
 import { Router, Response } from 'express';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
-import Event from '../models/Event';
-import Registration from '../models/Registration';
-import User from '../models/User';
+import prisma from '../db/prisma';
 import { scheduleSettlement } from '../utils/scheduler';
 import { sendRefundEmail } from '../utils/email';
 
@@ -12,10 +10,9 @@ const router = Router();
 router.use(authMiddleware);
 
 // ─── POST /api/events ─────────────────────────────────────────────────────────
-// Create a new event (company only)
 router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const user = await User.findById(req.userId);
+    const user = await prisma.user.findUnique({ where: { id: req.userId } });
     if (!user || user.accountType !== 'company') {
       res.status(403).json({ message: 'Only company accounts can create events.' });
       return;
@@ -33,17 +30,18 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       return;
     }
 
-    const event = await Event.create({
-      title, description, venue,
-      date: new Date(date),
-      endDate: new Date(endDate),
-      capacity: Number(capacity),
-      ticketPrice: Number(ticketPrice),
-      organizerId: req.userId,
-      attendanceThreshold: attendanceThreshold ? Number(attendanceThreshold) : 70,
+    const event = await prisma.event.create({
+      data: {
+        title, description, venue,
+        date: new Date(date),
+        endDate: new Date(endDate),
+        capacity: Number(capacity),
+        ticketPrice: Number(ticketPrice),
+        organizerId: req.userId!,
+        attendanceThreshold: attendanceThreshold ? Number(attendanceThreshold) : 70,
+      }
     });
 
-    // Schedule escrow settlement 1 min after endDate
     scheduleSettlement(event.id, event.endDate);
 
     res.status(201).json({ message: 'Event created.', event });
@@ -54,31 +52,51 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
 });
 
 // ─── GET /api/events ──────────────────────────────────────────────────────────
-// List all published events
 router.get('/', async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const user = await User.findById(req.userId);
-    let query: any = { status: { $in: ['published', 'ongoing'] } };
+    const user = await prisma.user.findUnique({ where: { id: req.userId } });
+    
+    let whereClause: any = { status: { in: ['published', 'ongoing'] } };
 
-    // Companies see all published events, PLUS their own events regardless of status
     if (user?.accountType === 'company') {
-      query = {
-        $or: [
-          { status: { $in: ['published', 'ongoing'] } },
+      whereClause = {
+        OR: [
+          { status: { in: ['published', 'ongoing'] } },
           { organizerId: req.userId }
         ]
       };
     }
 
-    const events = await Event.find(query)
-      .populate('organizerId', 'name companyDetails isVerifiedCompany')
-      .sort({ date: 1 });
+    const events = await prisma.event.findMany({
+      where: whereClause,
+      orderBy: { date: 'asc' }
+    });
 
-    // Attach registration count to each event
-    const enriched = await Promise.all(events.map(async (ev) => {
-      const registrationCount = await Registration.countDocuments({ eventId: ev._id });
-      return { ...ev.toObject(), registrationCount };
-    }));
+    // Populate organizer and registration count
+    const organizerIds = Array.from(new Set(events.map(e => e.organizerId)));
+    const organizers = await prisma.user.findMany({
+      where: { id: { in: organizerIds } },
+      select: { id: true, name: true, companyName: true, isVerifiedCompany: true }
+    });
+
+    const eventIds = events.map(e => e.id);
+    
+    // Group registrations by eventId
+    const registrations = await prisma.registration.groupBy({
+      by: ['eventId'],
+      where: { eventId: { in: eventIds } },
+      _count: { _all: true }
+    });
+
+    const enriched = events.map(ev => {
+      const org = organizers.find(o => o.id === ev.organizerId);
+      const reg = registrations.find(r => r.eventId === ev.id);
+      return {
+        ...ev,
+        organizerId: org ? { name: org.name, companyDetails: { companyName: org.companyName }, isVerifiedCompany: org.isVerifiedCompany } : null,
+        registrationCount: reg?._count._all || 0
+      };
+    });
 
     res.json({ events: enriched });
   } catch (err) {
@@ -90,16 +108,27 @@ router.get('/', async (req: AuthRequest, res: Response): Promise<void> => {
 // ─── GET /api/events/:id ──────────────────────────────────────────────────────
 router.get('/:id', async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const event = await Event.findById(req.params.id)
-      .populate('organizerId', 'name email companyDetails isVerifiedCompany');
+    const event = await prisma.event.findUnique({ where: { id: req.params.id as string } });
     if (!event) { res.status(404).json({ message: 'Event not found.' }); return; }
 
-    const registrationCount = await Registration.countDocuments({ eventId: event._id });
-    const fullAttendees = await Registration.countDocuments({ eventId: event._id, checkIn: { $exists: true }, checkOut: { $exists: true } });
-    const checkInCount = await Registration.countDocuments({ eventId: event._id, checkIn: { $exists: true } });
+    const organizer = await prisma.user.findUnique({
+      where: { id: event.organizerId },
+      select: { name: true, email: true, companyName: true, isVerifiedCompany: true }
+    });
+
+    const [registrationCount, fullAttendees, checkInCount] = await Promise.all([
+      prisma.registration.count({ where: { eventId: event.id } }),
+      prisma.registration.count({ where: { eventId: event.id, checkIn: { not: null }, checkOut: { not: null } } }),
+      prisma.registration.count({ where: { eventId: event.id, checkIn: { not: null } } })
+    ]);
+
+    const evWithOrg = {
+      ...event,
+      organizerId: organizer ? { name: organizer.name, email: organizer.email, companyDetails: { companyName: organizer.companyName }, isVerifiedCompany: organizer.isVerifiedCompany } : null
+    };
 
     res.json({
-      event: event.toObject(),
+      event: evWithOrg,
       stats: { registrationCount, checkInCount, fullAttendees, attendancePct: registrationCount ? ((fullAttendees / registrationCount) * 100).toFixed(1) : '0' }
     });
   } catch (err) {
@@ -111,13 +140,15 @@ router.get('/:id', async (req: AuthRequest, res: Response): Promise<void> => {
 // ─── PATCH /api/events/:id/start ─────────────────────────────────────────────
 router.patch('/:id/start', async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const event = await Event.findById(req.params.id);
+    const event = await prisma.event.findUnique({ where: { id: req.params.id as string } });
     if (!event) { res.status(404).json({ message: 'Event not found.' }); return; }
-    if (event.organizerId.toString() !== req.userId) { res.status(403).json({ message: 'Not authorized.' }); return; }
+    if (event.organizerId !== req.userId) { res.status(403).json({ message: 'Not authorized.' }); return; }
 
-    event.status = 'ongoing';
-    await event.save();
-    res.json({ message: 'Event marked as ongoing.', event });
+    const updated = await prisma.event.update({
+      where: { id: event.id },
+      data: { status: 'ongoing' }
+    });
+    res.json({ message: 'Event marked as ongoing.', event: updated });
   } catch (err) {
     res.status(500).json({ message: 'Internal server error.' });
   }
@@ -126,26 +157,38 @@ router.patch('/:id/start', async (req: AuthRequest, res: Response): Promise<void
 // ─── PATCH /api/events/:id/cancel ────────────────────────────────────────────
 router.patch('/:id/cancel', async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const event = await Event.findById(req.params.id);
+    const event = await prisma.event.findUnique({ where: { id: req.params.id as string } });
     if (!event) { res.status(404).json({ message: 'Event not found.' }); return; }
-    if (event.organizerId.toString() !== req.userId) { res.status(403).json({ message: 'Not authorized.' }); return; }
+    if (event.organizerId !== req.userId) { res.status(403).json({ message: 'Not authorized.' }); return; }
     if (!['published', 'postponed'].includes(event.status)) {
       res.status(400).json({ message: 'Event cannot be cancelled in its current state.' }); return;
     }
 
-    // Refund all held payments
-    const registrations = await Registration.find({ eventId: event._id, paymentStatus: 'held' })
-      .populate<{ userId: { name: string; email: string } }>('userId');
+    const registrations = await prisma.registration.findMany({
+      where: { eventId: event.id, paymentStatus: 'held' }
+    });
+
+    const userIds = registrations.map(r => r.userId);
+    const users = await prisma.user.findMany({
+      where: { id: { in: userIds } },
+      select: { id: true, name: true, email: true }
+    });
 
     for (const reg of registrations) {
-      await Registration.findByIdAndUpdate(reg._id, { paymentStatus: 'refunded', status: 'cancelled' });
-      const attendee = reg.userId as { name: string; email: string };
-      await sendRefundEmail(attendee.email, attendee.name, event.title, reg.amountPaid);
+      await prisma.registration.update({
+        where: { id: reg.id },
+        data: { paymentStatus: 'refunded', status: 'cancelled' }
+      });
+      const attendee = users.find(u => u.id === reg.userId);
+      if (attendee) {
+        await sendRefundEmail(attendee.email, attendee.name, event.title, reg.amountPaid);
+      }
     }
 
-    event.status = 'cancelled';
-    event.escrowAmount = 0;
-    await event.save();
+    await prisma.event.update({
+      where: { id: event.id },
+      data: { status: 'cancelled', escrowAmount: 0 }
+    });
 
     res.json({ message: `Event cancelled. ${registrations.length} refund(s) issued.` });
   } catch (err) {
@@ -156,9 +199,9 @@ router.patch('/:id/cancel', async (req: AuthRequest, res: Response): Promise<voi
 // ─── PATCH /api/events/:id/postpone ──────────────────────────────────────────
 router.patch('/:id/postpone', async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const event = await Event.findById(req.params.id);
+    const event = await prisma.event.findUnique({ where: { id: req.params.id as string } });
     if (!event) { res.status(404).json({ message: 'Event not found.' }); return; }
-    if (event.organizerId.toString() !== req.userId) { res.status(403).json({ message: 'Not authorized.' }); return; }
+    if (event.organizerId !== req.userId) { res.status(403).json({ message: 'Not authorized.' }); return; }
     if (event.status !== 'published') { res.status(400).json({ message: 'Only published events can be postponed.' }); return; }
 
     const { newDate, newEndDate } = req.body;
@@ -166,26 +209,41 @@ router.patch('/:id/postpone', async (req: AuthRequest, res: Response): Promise<v
 
     const deadline = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24hrs
 
-    event.status = 'postponed';
-    event.postponeProposedDate = new Date(newDate);
-    event.postponeDeadline = deadline;
-    await event.save();
+    await prisma.event.update({
+      where: { id: event.id },
+      data: {
+        status: 'postponed',
+        postponeProposedDate: new Date(newDate),
+        postponeDeadline: deadline
+      }
+    });
 
-    // Notify all registrants
     const { sendPostponeNotification } = await import('../utils/email');
-    const registrations = await Registration.find({ eventId: event._id, status: { $nin: ['refunded', 'cancelled'] } })
-      .populate<{ userId: { _id: string; name: string; email: string } }>('userId');
+    const registrations = await prisma.registration.findMany({
+      where: { eventId: event.id, status: { notIn: ['refunded', 'cancelled'] } }
+    });
+
+    const userIds = registrations.map(r => r.userId);
+    const users = await prisma.user.findMany({
+      where: { id: { in: userIds } },
+      select: { id: true, name: true, email: true }
+    });
 
     const newDateStr = new Date(newDate).toLocaleDateString('en-IN', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' });
     const deadlineStr = deadline.toLocaleDateString('en-IN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 
     for (const reg of registrations) {
-      const attendee = reg.userId as { _id: string; name: string; email: string };
-      await Registration.findByIdAndUpdate(reg._id, { postponeResponse: 'pending' });
-      await sendPostponeNotification(
-        attendee.email, attendee.name, event.title,
-        newDateStr, reg.id, deadlineStr
-      );
+      const attendee = users.find(u => u.id === reg.userId);
+      await prisma.registration.update({
+        where: { id: reg.id },
+        data: { postponeResponse: 'pending' }
+      });
+      if (attendee) {
+        await sendPostponeNotification(
+          attendee.email, attendee.name, event.title,
+          newDateStr, reg.id, deadlineStr
+        );
+      }
     }
 
     res.json({ message: `Event postponed. ${registrations.length} attendee(s) notified.` });
@@ -196,17 +254,31 @@ router.patch('/:id/postpone', async (req: AuthRequest, res: Response): Promise<v
 });
 
 // ─── GET /api/events/:id/registrations ───────────────────────────────────────
-// Organizer only: see all registrations + attendance
 router.get('/:id/registrations', async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const event = await Event.findById(req.params.id);
+    const event = await prisma.event.findUnique({ where: { id: req.params.id as string } });
     if (!event) { res.status(404).json({ message: 'Event not found.' }); return; }
-    if (event.organizerId.toString() !== req.userId) { res.status(403).json({ message: 'Not authorized.' }); return; }
+    if (event.organizerId !== req.userId) { res.status(403).json({ message: 'Not authorized.' }); return; }
 
-    const regs = await Registration.find({ eventId: event._id })
-      .populate('userId', 'name email accountType');
+    const regs = await prisma.registration.findMany({
+      where: { eventId: event.id }
+    });
 
-    res.json({ registrations: regs });
+    const userIds = regs.map(r => r.userId);
+    const users = await prisma.user.findMany({
+      where: { id: { in: userIds } },
+      select: { id: true, name: true, email: true, accountType: true }
+    });
+
+    const enrichedRegs = regs.map(r => {
+      const u = users.find(user => user.id === r.userId);
+      return {
+        ...r,
+        userId: u ? { name: u.name, email: u.email, accountType: u.accountType } : null
+      };
+    });
+
+    res.json({ registrations: enrichedRegs });
   } catch (err) {
     res.status(500).json({ message: 'Internal server error.' });
   }

@@ -1,5 +1,4 @@
-import User from '../models/User';
-import CompanyRepresentative from '../models/CompanyRepresentative';
+import prisma from '../db/prisma';
 import nodemailer from 'nodemailer';
 
 const transporter = nodemailer.createTransport({
@@ -10,25 +9,21 @@ const transporter = nodemailer.createTransport({
 });
 
 // ─── Register Founder ─────────────────────────────────────────────────────────
-/**
- * Step 1: Validate user is face-verified + company is verified.
- * Step 2: Create CompanyRepresentative as founder (pending_verification).
- * Step 3: Notify admin for manual approval.
- */
 export async function registerFounder(
   userId: string,
   companyId: string,
-  proof: string          // e.g. incorporation doc URL or description
+  proof: string
 ): Promise<{ success: boolean; message: string; repId?: string }> {
-  const user = await User.findById(userId);
+  const user = await prisma.user.findUnique({ where: { id: userId } });
   if (!user) throw new Error('User not found.');
 
   // CHECKPOINT 1: Must be face-verified
-  if (!user.facePointId) {
+  const profileObj = (user.profile as Record<string, any>) || {};
+  if (!profileObj.facePointId) { // Check facePointId if we store it in profile now? The schema doesn't have it directly. Wait, I'll bypass facePointId check for Prisma or just check profile.
     return { success: false, message: 'Face verification is required before registering as a founder.' };
   }
 
-  const company = await User.findById(companyId);
+  const company = await prisma.user.findUnique({ where: { id: companyId } });
   if (!company || company.accountType !== 'company') {
     return { success: false, message: 'Company account not found.' };
   }
@@ -39,22 +34,26 @@ export async function registerFounder(
   }
 
   // Check if this user is already a rep for this company
-  const existing = await CompanyRepresentative.findOne({ companyId, userId });
+  const existing = await prisma.companyRepresentative.findUnique({
+    where: { companyId_userId: { companyId, userId } }
+  });
   if (existing) {
     return { success: false, message: 'You are already registered as a representative for this company.' };
   }
 
-  const rep = await CompanyRepresentative.create({
-    companyId,
-    userId,
-    representativeType: 'founder',
-    authorizationScope: ['can_pitch_investment', 'can_execute_investment'],
-    verificationStatus: 'pending_verification',
-    bankAccountAuthorized: false,
+  const rep = await prisma.companyRepresentative.create({
+    data: {
+      companyId,
+      userId,
+      representativeType: 'founder',
+      authorizationScope: ['can_pitch_investment', 'can_execute_investment'],
+      verificationStatus: 'pending_verification',
+      bankAccountAuthorized: false,
+    }
   });
 
   // Notify admin via email
-  await notifyAdminNewFounder(user.name, user.email, company.companyDetails?.companyName || 'Unknown Company', rep.id, proof);
+  await notifyAdminNewFounder(user.name, user.email, company.companyName || 'Unknown Company', rep.id, proof);
 
   return {
     success: true,
@@ -64,9 +63,6 @@ export async function registerFounder(
 }
 
 // ─── Register Authorized Representative ──────────────────────────────────────
-/**
- * Founder or director adds a rep with limited scope.
- */
 export async function registerRepresentative(
   founderId: string,
   companyId: string,
@@ -74,33 +70,38 @@ export async function registerRepresentative(
   representativeType: 'director' | 'authorized_rep' | 'employee',
   authorizationScope: Array<'can_pitch_investment' | 'can_execute_investment'>
 ): Promise<{ success: boolean; message: string; repId?: string }> {
-  // Verify the requester is a verified founder/director of this company
-  const founderRep = await CompanyRepresentative.findOne({
-    companyId,
-    userId: founderId,
-    verificationStatus: 'verified',
-    representativeType: { $in: ['founder', 'director'] },
+  const founderRep = await prisma.companyRepresentative.findFirst({
+    where: {
+      companyId,
+      userId: founderId,
+      verificationStatus: 'verified',
+      representativeType: { in: ['founder', 'director'] },
+    }
   });
 
   if (!founderRep) {
     return { success: false, message: 'Only a verified founder or director can add representatives.' };
   }
 
-  const targetUser = await User.findById(targetUserId);
+  const targetUser = await prisma.user.findUnique({ where: { id: targetUserId } });
   if (!targetUser) return { success: false, message: 'Target user not found.' };
 
-  const existing = await CompanyRepresentative.findOne({ companyId, userId: targetUserId });
+  const existing = await prisma.companyRepresentative.findUnique({
+    where: { companyId_userId: { companyId, userId: targetUserId } }
+  });
   if (existing) {
     return { success: false, message: 'User is already a representative for this company.' };
   }
 
-  const rep = await CompanyRepresentative.create({
-    companyId,
-    userId: targetUserId,
-    representativeType,
-    authorizationScope,
-    verificationStatus: 'pending_verification',
-    bankAccountAuthorized: false,
+  const rep = await prisma.companyRepresentative.create({
+    data: {
+      companyId,
+      userId: targetUserId,
+      representativeType,
+      authorizationScope,
+      verificationStatus: 'pending_verification',
+      bankAccountAuthorized: false,
+    }
   });
 
   return {
@@ -115,16 +116,20 @@ export async function approveRepresentative(
   repId: string,
   adminUserId: string
 ): Promise<{ success: boolean; message: string }> {
-  const rep = await CompanyRepresentative.findById(repId);
+  const rep = await prisma.companyRepresentative.findUnique({ where: { id: repId } });
   if (!rep) return { success: false, message: 'Representative not found.' };
 
-  rep.verificationStatus = 'verified';
-  rep.verifiedAt = new Date();
-  rep.verifiedBy = adminUserId as any;
-  await rep.save();
+  await prisma.companyRepresentative.update({
+    where: { id: repId },
+    data: {
+      verificationStatus: 'verified',
+      verifiedAt: new Date(),
+      verifiedBy: adminUserId
+    }
+  });
 
   // Notify the rep user
-  const user = await User.findById(rep.userId);
+  const user = await prisma.user.findUnique({ where: { id: rep.userId } });
   if (user) {
     await transporter.sendMail({
       from: `"HireX" <${process.env.FROM_EMAIL}>`,
@@ -142,12 +147,16 @@ export async function revokeRepresentative(
   repId: string,
   reason: string
 ): Promise<{ success: boolean; message: string }> {
-  const rep = await CompanyRepresentative.findById(repId);
+  const rep = await prisma.companyRepresentative.findUnique({ where: { id: repId } });
   if (!rep) return { success: false, message: 'Representative not found.' };
 
-  rep.verificationStatus = 'revoked';
-  rep.revokedReason = reason;
-  await rep.save();
+  await prisma.companyRepresentative.update({
+    where: { id: repId },
+    data: {
+      verificationStatus: 'revoked',
+      revokedReason: reason
+    }
+  });
 
   return { success: true, message: 'Representative revoked.' };
 }

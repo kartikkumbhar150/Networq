@@ -1,10 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
-import User from '../models/User';
-import Post from '../models/Post';
-import Event from '../models/Event';
-import Transaction from '../models/Transaction';
-import mongoose from 'mongoose';
+import prisma from '../db/prisma';
 
 const router = Router();
 
@@ -16,14 +12,14 @@ const BOOST_DURATION_MS = 24 * 60 * 60 * 1000; // 24 hours
 router.post('/boost', authMiddleware, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { entityType, entityId } = req.body;
-    const userId = req.userId;
+    const userId = req.userId!;
 
     if (!['post', 'event', 'profile', 'company'].includes(entityType) || !entityId) {
       res.status(400).json({ message: 'Valid entityType and entityId are required.' });
       return;
     }
 
-    const user = await User.findById(userId);
+    const user = await prisma.user.findUnique({ where: { id: userId } });
     if (!user) {
       res.status(404).json({ message: 'User not found.' });
       return;
@@ -38,40 +34,41 @@ router.post('/boost', authMiddleware, async (req: AuthRequest, res: Response): P
     let entityIdent = '';
 
     if (entityType === 'post') {
-      const post = await Post.findById(entityId);
+      const post = await prisma.post.findUnique({ where: { id: entityId } });
       if (!post) { res.status(404).json({ message: 'Post not found.' }); return; }
-      post.boostedUntil = boostUntil;
-      await post.save();
+      await prisma.post.update({ where: { id: entityId }, data: { boostedUntil: boostUntil } });
       entityIdent = 'Post';
     } 
     else if (entityType === 'event') {
-      const event = await Event.findById(entityId);
+      const event = await prisma.event.findUnique({ where: { id: entityId } });
       if (!event) { res.status(404).json({ message: 'Event not found.' }); return; }
-      event.boostedUntil = boostUntil;
-      await event.save();
+      await prisma.event.update({ where: { id: entityId }, data: { boostedUntil: boostUntil } });
       entityIdent = 'Event';
     } 
     else if (entityType === 'profile' || entityType === 'company') {
-      const targetUser = await User.findById(entityId);
+      const targetUser = await prisma.user.findUnique({ where: { id: entityId } });
       if (!targetUser) { res.status(404).json({ message: 'User not found.' }); return; }
-      targetUser.boostedUntil = boostUntil;
-      await targetUser.save();
+      await prisma.user.update({ where: { id: entityId }, data: { boostedUntil: boostUntil } });
       entityIdent = entityType === 'company' ? 'Company Page' : 'Profile';
     }
 
     // Deduct credits
-    user.promoCredits -= BOOST_COST;
-    await user.save();
-
-    // Log transaction
-    await Transaction.create({
-      userId: user.id,
-      type: 'boost',
-      amount: -BOOST_COST,
-      description: `Basic Boost applied to ${entityIdent} for 24 hours`,
+    const updatedUser = await prisma.user.update({
+      where: { id: userId },
+      data: { promoCredits: user.promoCredits - BOOST_COST }
     });
 
-    res.status(200).json({ message: `${entityIdent} boosted successfully until ${boostUntil.toLocaleString()}`, promoCredits: user.promoCredits });
+    // Log transaction
+    await prisma.transaction.create({
+      data: {
+        userId,
+        type: 'boost',
+        amount: -BOOST_COST,
+        description: `Basic Boost applied to ${entityIdent} for 24 hours`,
+      }
+    });
+
+    res.status(200).json({ message: `${entityIdent} boosted successfully until ${boostUntil.toLocaleString()}`, promoCredits: updatedUser.promoCredits });
   } catch (err) {
     res.status(500).json({ message: 'Internal server error.' });
   }
@@ -81,27 +78,31 @@ router.post('/boost', authMiddleware, async (req: AuthRequest, res: Response): P
 router.post('/topup', authMiddleware, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { amount } = req.body;
-    const userId = req.userId;
+    const userId = req.userId!;
 
     if (!amount || amount <= 0) {
       res.status(400).json({ message: 'Valid amount required.' });
       return;
     }
 
-    const user = await User.findById(userId);
+    const user = await prisma.user.findUnique({ where: { id: userId } });
     if (!user) return;
 
-    user.promoCredits += amount;
-    await user.save();
-
-    await Transaction.create({
-      userId: user.id,
-      type: 'topup',
-      amount: amount,
-      description: `Fiat Wallet Top-Up: ${amount} Credits Added`,
+    const updatedUser = await prisma.user.update({
+      where: { id: userId },
+      data: { promoCredits: user.promoCredits + amount }
     });
 
-    res.status(200).json({ message: `Successfully topped up ${amount} credits!`, promoCredits: user.promoCredits });
+    await prisma.transaction.create({
+      data: {
+        userId,
+        type: 'topup',
+        amount: amount,
+        description: `Fiat Wallet Top-Up: ${amount} Credits Added`,
+      }
+    });
+
+    res.status(200).json({ message: `Successfully topped up ${amount} credits!`, promoCredits: updatedUser.promoCredits });
   } catch (err) {
     res.status(500).json({ message: 'Internal server error.' });
   }
@@ -113,38 +114,51 @@ router.get('/leaderboard', async (req: Request, res: Response): Promise<void> =>
     const cityParam = req.query.city as string;
 
     // Global Top Referrers
-    const globalReferrers = await User.find({ referralCount: { $gt: 0 } })
-      .sort({ referralCount: -1 })
-      .limit(10)
-      .select('name profile.location profilePhoto accountType referralCount milestoneBadges');
+    const globalReferrers = await prisma.user.findMany({
+      where: { referralCount: { gt: 0 } },
+      orderBy: { referralCount: 'desc' },
+      take: 10,
+      select: { name: true, profile: true, accountType: true, referralCount: true, milestoneBadges: true }
+    });
 
-    // City Top Referrers
+    // City Top Referrers - In Prisma querying nested JSON via regex is tricky. 
+    // We'll fetch users with >0 referrals and filter in-memory for city.
     let cityReferrers: any[] = [];
     if (cityParam) {
-       cityReferrers = await User.find({ 'profile.location': { $regex: new RegExp(cityParam, 'i') }, referralCount: { $gt: 0 } })
-        .sort({ referralCount: -1 })
-        .limit(10)
-        .select('name profile.location profilePhoto accountType referralCount milestoneBadges');
+       const cityUsers = await prisma.user.findMany({
+          where: { referralCount: { gt: 0 } },
+          orderBy: { referralCount: 'desc' },
+          select: { name: true, profile: true, accountType: true, referralCount: true, milestoneBadges: true }
+       });
+       const cityRegex = new RegExp(cityParam, 'i');
+       cityReferrers = cityUsers.filter(u => {
+          const loc = (u.profile as any)?.location;
+          return loc && cityRegex.test(loc);
+       }).slice(0, 10);
     }
 
-    // Fastest 1000 Verified Joins (the first 1000 members overall)
-    const fastest1000 = await User.find({ isVerified: true })
-      .sort({ createdAt: 1 })
-      .limit(1000)
-      .select('name profile.location profilePhoto accountType createdAt isVerifiedCompany');
+    // Fastest 1000 Verified Joins
+    const fastest1000 = await prisma.user.findMany({
+      where: { isVerified: true },
+      orderBy: { createdAt: 'asc' },
+      take: 1000,
+      select: { name: true, profile: true, accountType: true, createdAt: true, isVerifiedCompany: true }
+    });
 
-    // First & Fastest 1,000 Verified Joins Promoters Leaderboard
-    const megaGiftLeaderboard = await User.find({ hasReached1000MilestoneAt: { $ne: null } })
-      .sort({ hasReached1000MilestoneAt: 1 })
-      .limit(30)
-      .select('name profile.location profilePhoto accountType verifiedReferralCount hasReached1000MilestoneAt milestoneBadges');
+    // Mega Gift Leaderboard
+    const megaGiftLeaderboard = await prisma.user.findMany({
+      where: { hasReached1000MilestoneAt: { not: null } },
+      orderBy: { hasReached1000MilestoneAt: 'asc' },
+      take: 30,
+      select: { name: true, profile: true, accountType: true, verifiedReferralCount: true, hasReached1000MilestoneAt: true, milestoneBadges: true }
+    });
 
     res.status(200).json({
       success: true,
-      globalReferrers,
-      cityReferrers,
-      fastest1000,
-      megaGiftLeaderboard
+      globalReferrers: globalReferrers.map(r => ({ ...r, profilePhoto: (r.profile as any)?.profilePhoto })),
+      cityReferrers: cityReferrers.map(r => ({ ...r, profilePhoto: (r.profile as any)?.profilePhoto })),
+      fastest1000: fastest1000.map(r => ({ ...r, profilePhoto: (r.profile as any)?.profilePhoto })),
+      megaGiftLeaderboard: megaGiftLeaderboard.map(r => ({ ...r, profilePhoto: (r.profile as any)?.profilePhoto }))
     });
   } catch (err) {
     res.status(500).json({ message: 'Error fetching leaderboards.' });
@@ -153,15 +167,18 @@ router.get('/leaderboard', async (req: Request, res: Response): Promise<void> =>
 
 // 4. Admin View All Transactions
 router.get('/transactions', authMiddleware, async (req: AuthRequest, res: Response): Promise<void> => {
-   // In a real app we check req.user isAdmin. We assume anyone hitting this in the hackathon MVP can view their own, or global if no param
    try {
      const asAdmin = req.query.admin === 'true';
-     let query = {};
+     let whereClause = {};
      if (!asAdmin) {
-        query = { userId: req.userId };
+        whereClause = { userId: req.userId };
      }
 
-     const logs = await Transaction.find(query).sort({ createdAt: -1 }).limit(100);
+     const logs = await prisma.transaction.findMany({
+       where: whereClause,
+       orderBy: { createdAt: 'desc' },
+       take: 100
+     });
      res.status(200).json({ success: true, logs });
    } catch(e) {
      res.status(500).json({ message: 'Error fetching logs.' });
@@ -171,7 +188,10 @@ router.get('/transactions', authMiddleware, async (req: AuthRequest, res: Respon
 // 5. User Summary (Fetch own credits/code)
 router.get('/me', authMiddleware, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const user = await User.findById(req.userId).select('referralCode referralCount verifiedReferralCount promoCredits milestoneBadges');
+    const user = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: { referralCode: true, referralCount: true, verifiedReferralCount: true, promoCredits: true, milestoneBadges: true }
+    });
     if (!user) { res.status(404).json({ message: 'No user' }); return; }
     res.status(200).json({ success: true, user });
   } catch(e) {
@@ -183,14 +203,16 @@ router.get('/me', authMiddleware, async (req: AuthRequest, res: Response): Promi
 router.post('/admin/mega-gift', authMiddleware, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
      const { targetId, giftName } = req.body;
-     const target = await User.findById(targetId);
+     const target = await prisma.user.findUnique({ where: { id: targetId } });
      if (!target) { res.status(404).json({ message: 'User not found' }); return; }
 
-     await Transaction.create({
-        userId: target.id,
-        type: 'milestone',
-        amount: 0,
-        description: `MEGA GIFT AWARDED: ${giftName}!`
+     await prisma.transaction.create({
+        data: {
+          userId: target.id,
+          type: 'milestone',
+          amount: 0,
+          description: `MEGA GIFT AWARDED: ${giftName}!`
+        }
      });
 
      res.status(200).json({ success: true, message: `Mega Gift explicitly awarded to ${target.name}!` });

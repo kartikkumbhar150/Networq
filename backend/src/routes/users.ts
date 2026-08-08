@@ -76,8 +76,9 @@ router.get('/search', async (req: AuthRequest, res: Response): Promise<void> => 
 // ─── GET /api/users/:userId/profile ──────────────────────────────────────────
 router.get('/:userId/profile', async (req: Request, res: Response): Promise<void> => {
   try {
+    const targetUserId = req.params.userId as string;
     const user = await prisma.user.findUnique({
-      where: { id: req.params.userId },
+      where: { id: targetUserId },
       select: {
         id: true, name: true, email: true, authProvider: true, providerId: true,
         accountType: true, companyName: true, cin: true, gstin: true,
@@ -88,10 +89,10 @@ router.get('/:userId/profile', async (req: Request, res: Response): Promise<void
     });
     if (!user) { res.status(404).json({ message: 'User not found.' }); return; }
 
-    const postCount = await prisma.post.count({ where: { authorId: req.params.userId } });
+    const postCount = await prisma.post.count({ where: { authorId: targetUserId } });
     const connectionCount = await prisma.connection.count({
       where: {
-        OR: [{ requesterId: req.params.userId }, { receiverId: req.params.userId }],
+        OR: [{ requesterId: targetUserId }, { receiverId: targetUserId }],
         status: 'accepted',
       },
     });

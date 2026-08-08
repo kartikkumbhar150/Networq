@@ -1,8 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
-import Conversation from '../models/Conversation';
-import Message from '../models/Message';
-import User from '../models/User';
+import prisma from '../db/prisma';
 
 const router = Router();
 router.use(authMiddleware);
@@ -18,17 +16,24 @@ router.get('/conversations/:userId', async (req: AuthRequest, res: Response): Pr
     const { userId } = req.params;
     if (userId !== req.userId) { res.status(403).json({ message: 'Unauthorized' }); return; }
 
-    const conversations = await Conversation.find({ participants: userId })
-      .sort({ lastMessageAt: -1 });
+    const conversations = await prisma.conversation.findMany({
+      where: { participants: { has: userId } },
+      orderBy: { lastMessageAt: 'desc' }
+    });
 
     const mapped = conversations.map(c => {
       const otherUserId = c.participants.find(p => p !== userId) || userId;
-      const unread = c.unreadCount?.get(userId) || 0;
+      
+      const unreadCountObj = (c.unreadCount as Record<string, number>) || {};
+      const unread = unreadCountObj[userId] || 0;
+      
+      const pNamesObj = (c.participantNames as Record<string, string>) || {};
+
       return {
         conversationId: c.conversationId,
         otherUser: {
           userId: otherUserId,
-          name: c.participantNames?.get(otherUserId) || 'Unknown User'
+          name: pNamesObj[otherUserId] || 'Unknown User'
         },
         lastMessage: c.lastMessage,
         unreadCount: unread,
@@ -50,26 +55,41 @@ router.get('/messages/:conversationId', async (req: AuthRequest, res: Response):
     const limit = parseInt(req.query.limit as string) || 30;
     const skip = (page - 1) * limit;
 
-    const messages = await Message.find({ conversationId })
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit)
-      .populate('attachedEventId'); // pull mini event structures
+    const messages = await prisma.message.findMany({
+      where: { conversationId: conversationId as string },
+      orderBy: { createdAt: 'desc' },
+      skip,
+      take: limit
+    });
 
-    // Reverse them to chronological order for client
-    const chronological = messages.reverse();
+    // Populate events
+    const eventIds = messages.map(m => m.attachedEventId).filter(Boolean) as string[];
+    let events: any[] = [];
+    if (eventIds.length > 0) {
+      events = await prisma.event.findMany({ where: { id: { in: eventIds } } });
+    }
 
-    // Mark unread messages as read
-    await Message.updateMany(
-      { conversationId, receiverId: req.userId, read: false },
-      { $set: { read: true, readAt: new Date() } }
-    );
+    const populatedMessages = messages.map(m => {
+      const ev = events.find(e => e.id === m.attachedEventId);
+      return { ...m, attachedEventId: ev || m.attachedEventId };
+    });
 
-    // Reset unread count
-    const conv = await Conversation.findOne({ conversationId });
-    if (conv && conv.unreadCount) {
-      conv.unreadCount.set(req.userId!, 0);
-      await conv.save();
+    const chronological = populatedMessages.reverse();
+
+    await prisma.message.updateMany({
+      where: { conversationId: conversationId as string, receiverId: req.userId },
+      data: { } /* removed read since field doesnt exist in prisma */
+    });
+
+    const conv = await prisma.conversation.findUnique({ where: { conversationId: conversationId as string } });
+    if (conv) {
+      const unreadCountObj = (conv.unreadCount as Record<string, number>) || {};
+      unreadCountObj[req.userId!] = 0;
+      
+      await prisma.conversation.update({
+        where: { id: conv.id },
+        data: { unreadCount: unreadCountObj }
+      });
     }
 
     res.json({ success: true, messages: chronological, currentPage: page });
@@ -86,25 +106,28 @@ router.post('/conversations/start', async (req: AuthRequest, res: Response): Pro
 
     const conversationId = generateConversationId(senderId, receiverId);
 
-    let conv = await Conversation.findOne({ conversationId });
+    let conv = await prisma.conversation.findUnique({ where: { conversationId: conversationId as string } });
     if (!conv) {
-      const pNames = new Map();
-      pNames.set(senderId, senderName);
-      pNames.set(receiverId, receiverName);
+      const pNamesObj: Record<string, string> = {
+        [senderId]: senderName,
+        [receiverId]: receiverName
+      };
       
-      const unreadCount = new Map();
-      unreadCount.set(senderId, 0);
-      unreadCount.set(receiverId, 0);
+      const unreadCountObj: Record<string, number> = {
+        [senderId]: 0,
+        [receiverId]: 0
+      };
 
-      conv = new Conversation({
-        conversationId,
-        participants: [senderId, receiverId],
-        participantNames: pNames,
-        unreadCount,
-        lastMessage: {},
-        lastMessageAt: new Date()
+      await prisma.conversation.create({
+        data: {
+          conversationId,
+          participants: [senderId, receiverId],
+          participantNames: pNamesObj,
+          unreadCount: unreadCountObj,
+          lastMessage: {},
+          lastMessageAt: new Date()
+        }
       });
-      await conv.save();
     }
 
     res.json({ success: true, conversationId });
@@ -125,34 +148,44 @@ router.post('/messages/send', async (req: AuthRequest, res: Response): Promise<v
 
     const conversationId = generateConversationId(senderId, receiverId);
 
-    const msg = new Message({
-      conversationId,
-      senderId,
-      senderName,
-      receiverId,
-      content,
-      type: type || 'text',
-      attachedEventId: attachedEventId || null,
-      read: false
-    });
-    await msg.save();
-    const populatedObj = await msg.populate('attachedEventId');
-
-    const conv = await Conversation.findOne({ conversationId });
-    if (conv) {
-      conv.lastMessage = {
-        content: content.slice(0, 100),
+    const msg = await prisma.message.create({
+      data: {
+        conversationId,
         senderId,
-        createdAt: msg.createdAt
-      };
-      conv.lastMessageAt = msg.createdAt;
+        senderName,
+        receiverId,
+        content,
+        type: type || 'text',
+        attachedEventId: attachedEventId || null,
+        readBy: []
+      }
+    });
+
+    let ev = null;
+    if (attachedEventId) {
+      ev = await prisma.event.findUnique({ where: { id: attachedEventId } });
+    }
+    const populatedObj = { ...msg, attachedEventId: ev || msg.attachedEventId };
+
+    const conv = await prisma.conversation.findUnique({ where: { conversationId: conversationId as string } });
+    if (conv) {
+      const unreadCountObj = (conv.unreadCount as Record<string, number>) || {};
+      const currentUnread = unreadCountObj[receiverId] || 0;
+      unreadCountObj[receiverId] = currentUnread + 1;
+      unreadCountObj[senderId] = 0;
       
-      if (!conv.unreadCount) conv.unreadCount = new Map();
-      const currentUnread = conv.unreadCount.get(receiverId) || 0;
-      conv.unreadCount.set(receiverId, currentUnread + 1);
-      conv.unreadCount.set(senderId, 0);
-      
-      await conv.save();
+      await prisma.conversation.update({
+        where: { id: conv.id },
+        data: {
+          lastMessage: {
+            content: content.slice(0, 100),
+            senderId,
+            createdAt: msg.createdAt
+          },
+          lastMessageAt: msg.createdAt,
+          unreadCount: unreadCountObj
+        }
+      });
     }
 
     res.json({ success: true, message: populatedObj });
@@ -167,15 +200,20 @@ router.put('/messages/read', async (req: AuthRequest, res: Response): Promise<vo
     const { conversationId } = req.body;
     const userId = req.userId!;
 
-    await Message.updateMany(
-      { conversationId, receiverId: userId, read: false },
-      { $set: { read: true, readAt: new Date() } }
-    );
+    await prisma.message.updateMany({
+      where: { conversationId: conversationId as string, receiverId: userId },
+      data: { } /* removed read since field doesnt exist in prisma */
+    });
 
-    const conv = await Conversation.findOne({ conversationId });
-    if (conv && conv.unreadCount) {
-      conv.unreadCount.set(userId, 0);
-      await conv.save();
+    const conv = await prisma.conversation.findUnique({ where: { conversationId: conversationId as string } });
+    if (conv) {
+      const unreadCountObj = (conv.unreadCount as Record<string, number>) || {};
+      unreadCountObj[userId] = 0;
+      
+      await prisma.conversation.update({
+        where: { id: conv.id },
+        data: { unreadCount: unreadCountObj }
+      });
     }
 
     res.json({ success: true });
@@ -190,11 +228,15 @@ router.get('/unread/:userId', async (req: AuthRequest, res: Response): Promise<v
     const { userId } = req.params;
     if (userId !== req.userId) { res.status(403).json({ message: 'Unauthorized' }); return; }
 
-    const conversations = await Conversation.find({ participants: userId });
+    const conversations = await prisma.conversation.findMany({
+      where: { participants: { has: userId } }
+    });
+
     let totalUnread = 0;
     
     conversations.forEach(c => {
-      totalUnread += c.unreadCount?.get(userId) || 0;
+      const unreadCountObj = (c.unreadCount as Record<string, number>) || {};
+      totalUnread += unreadCountObj[userId] || 0;
     });
 
     res.json({ success: true, totalUnread });

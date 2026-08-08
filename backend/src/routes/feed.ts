@@ -1,10 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
-import Post from '../models/Post';
-import Connection from '../models/Connection';
-import Event from '../models/Event';
-import User from '../models/User';
+import prisma from '../db/prisma';
 
 const router = Router();
 
@@ -22,27 +19,28 @@ router.post('/posts/create', async (req: AuthRequest, res: Response): Promise<vo
     }
 
     if (attachedEventId) {
-      const event = await Event.findById(attachedEventId);
+      const event = await prisma.event.findUnique({ where: { id: attachedEventId } });
       if (!event) {
         res.status(404).json({ message: 'Attached event not found.' });
         return;
       }
     }
 
-    const author = await User.findById(authorId);
+    const author = await prisma.user.findUnique({ where: { id: authorId } });
     if (!author) { res.status(404).json({ message: 'Author not found.' }); return; }
 
-    const post = new Post({
-      authorId,
-      authorName: author.name,
-      authorAvatar: (author as any).profile?.profilePhoto,
-      content,
-      type: type || 'text',
-      attachedEventId,
+    const post = await prisma.post.create({
+      data: {
+        authorId,
+        authorName: author.name,
+        authorAvatar: (author.profile as any)?.profilePhoto,
+        content,
+        type: type || 'text',
+        attachedEventId,
+      }
     });
 
-    await post.save();
-    res.json({ success: true, postId: post._id, post });
+    res.json({ success: true, postId: post.id, post });
   } catch (err) {
     res.status(500).json({ message: 'Internal server error.' });
   }
@@ -58,49 +56,62 @@ router.get('/posts', async (req: AuthRequest, res: Response): Promise<void> => {
     const limit = parseInt(req.query.limit as string) || 10;
     const skip = (page - 1) * limit;
 
-    let posts;
+    let posts: any[] = [];
 
     if (authorIdFilter) {
-      // Direct user wall fetch
-      posts = await Post.find({ authorId: authorIdFilter })
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limit)
-        .populate('attachedEventId');
+      posts = await prisma.post.findMany({
+        where: { authorId: authorIdFilter },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit
+      });
     } else {
-      // Build connection allow-list
       const allowList: string[] = [currentUserId];
-      const connections = await Connection.find({
-        $or: [{ requesterId: currentUserId }, { receiverId: currentUserId }],
-        status: 'accepted',
+      const connections = await prisma.connection.findMany({
+        where: {
+          OR: [{ requesterId: currentUserId }, { receiverId: currentUserId }],
+          status: 'accepted',
+        }
       });
       const friendIds = connections.map(c => c.requesterId === currentUserId ? c.receiverId : c.requesterId);
       allowList.push(...friendIds);
 
-      // Fetch connection posts first
-      posts = await Post.find({ authorId: { $in: allowList } })
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limit)
-        .populate('attachedEventId');
+      posts = await prisma.post.findMany({
+        where: { authorId: { in: allowList } },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit
+      });
 
-      // If not enough posts from connections, fill with public/global posts
       if (posts.length < limit) {
-        const existingIds = posts.map(p => p._id);
+        const existingIds = posts.map(p => p.id);
         const remaining = limit - posts.length;
-        const publicPosts = await Post.find({
-          _id: { $nin: existingIds },
-          authorId: { $nin: allowList }
-        })
-          .sort({ createdAt: -1 })
-          .skip(skip > 0 ? Math.max(0, skip - posts.length) : 0)
-          .limit(remaining)
-          .populate('attachedEventId');
+        const publicPosts = await prisma.post.findMany({
+          where: {
+            id: { notIn: existingIds },
+            authorId: { notIn: allowList }
+          },
+          orderBy: { createdAt: 'desc' },
+          skip: skip > 0 ? Math.max(0, skip - posts.length) : 0,
+          take: remaining
+        });
         posts = [...posts, ...publicPosts];
       }
     }
 
-    res.json({ success: true, posts, currentPage: page });
+    // Populate attached events
+    const eventIds = posts.map(p => p.attachedEventId).filter(Boolean) as string[];
+    let events: any[] = [];
+    if (eventIds.length > 0) {
+      events = await prisma.event.findMany({ where: { id: { in: eventIds } } });
+    }
+
+    const enrichedPosts = posts.map(p => {
+      const ev = events.find(e => e.id === p.attachedEventId);
+      return { ...p, attachedEventId: ev || p.attachedEventId };
+    });
+
+    res.json({ success: true, posts: enrichedPosts, currentPage: page });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: 'Internal server error.' });
@@ -110,24 +121,31 @@ router.get('/posts', async (req: AuthRequest, res: Response): Promise<void> => {
 // ─── POST /api/feed/posts/:postId/like ───────────────────────────────────────
 router.post('/posts/:postId/like', async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const post = await Post.findById(req.params.postId);
+    const post = await prisma.post.findUnique({ where: { id: req.params.postId as string } });
     if (!post) { res.status(404).json({ message: 'Post not found.' }); return; }
 
     const userId = req.userId!;
-    const idx = post.likes.findIndex(l => l.userId === userId);
+    const likes = (post.likes as any[]) || [];
+    const idx = likes.findIndex(l => l.userId === userId);
 
     let liked = false;
+    let likeCount = post.likeCount;
+    
     if (idx === -1) {
-      post.likes.push({ userId, likedAt: new Date() });
-      post.likeCount += 1;
+      likes.push({ userId, likedAt: new Date() });
+      likeCount += 1;
       liked = true;
     } else {
-      post.likes.splice(idx, 1);
-      post.likeCount = Math.max(0, post.likeCount - 1);
+      likes.splice(idx, 1);
+      likeCount = Math.max(0, likeCount - 1);
     }
 
-    await post.save();
-    res.json({ success: true, liked, likeCount: post.likeCount });
+    await prisma.post.update({
+      where: { id: post.id },
+      data: { likes, likeCount }
+    });
+
+    res.json({ success: true, liked, likeCount });
   } catch (err) {
     res.status(500).json({ message: 'Internal server error.' });
   }
@@ -139,10 +157,10 @@ router.post('/posts/:postId/comment', async (req: AuthRequest, res: Response): P
     const { content } = req.body;
     if (!content) { res.status(400).json({ message: 'Content required.' }); return; }
 
-    const post = await Post.findById(req.params.postId);
+    const post = await prisma.post.findUnique({ where: { id: req.params.postId as string } });
     if (!post) { res.status(404).json({ message: 'Post not found.' }); return; }
 
-    const author = await User.findById(req.userId);
+    const author = await prisma.user.findUnique({ where: { id: req.userId! } });
 
     const newComment = {
       commentId: uuidv4(),
@@ -152,9 +170,16 @@ router.post('/posts/:postId/comment', async (req: AuthRequest, res: Response): P
       createdAt: new Date(),
     };
 
-    post.comments.push(newComment);
-    post.commentCount += 1;
-    await post.save();
+    const comments = (post.comments as any[]) || [];
+    comments.push(newComment);
+
+    await prisma.post.update({
+      where: { id: post.id },
+      data: {
+        comments,
+        commentCount: post.commentCount + 1
+      }
+    });
 
     res.json({ success: true, comment: newComment });
   } catch (err) {
@@ -165,7 +190,7 @@ router.post('/posts/:postId/comment', async (req: AuthRequest, res: Response): P
 // ─── DELETE /api/feed/posts/:postId ──────────────────────────────────────────
 router.delete('/posts/:postId', async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const post = await Post.findById(req.params.postId);
+    const post = await prisma.post.findUnique({ where: { id: req.params.postId as string } });
     if (!post) { res.status(404).json({ message: 'Post not found.' }); return; }
 
     if (post.authorId !== req.userId) {
@@ -173,7 +198,7 @@ router.delete('/posts/:postId', async (req: AuthRequest, res: Response): Promise
       return;
     }
 
-    await Post.findByIdAndDelete(req.params.postId);
+    await prisma.post.delete({ where: { id: post.id } });
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ message: 'Internal server error.' });

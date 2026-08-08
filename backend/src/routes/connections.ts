@@ -1,7 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
-import Connection from '../models/Connection';
-import User from '../models/User';
+import prisma from '../db/prisma';
 
 const router = Router();
 
@@ -18,14 +17,16 @@ router.post('/request', async (req: AuthRequest, res: Response): Promise<void> =
       return;
     }
 
-    const requester = await User.findById(requesterId);
+    const requester = await prisma.user.findUnique({ where: { id: requesterId } });
     if (!requester) { res.status(404).json({ message: 'Requester not found' }); return; }
 
-    const existing = await Connection.findOne({
-      $or: [
-        { requesterId, receiverId, status: { $in: ['pending', 'accepted'] } },
-        { requesterId: receiverId, receiverId: requesterId, status: { $in: ['pending', 'accepted'] } },
-      ],
+    const existing = await prisma.connection.findFirst({
+      where: {
+        OR: [
+          { requesterId, receiverId, status: { in: ['pending', 'accepted'] } },
+          { requesterId: receiverId, receiverId: requesterId, status: { in: ['pending', 'accepted'] } },
+        ]
+      }
     });
 
     if (existing) {
@@ -33,17 +34,18 @@ router.post('/request', async (req: AuthRequest, res: Response): Promise<void> =
       return;
     }
 
-    const connection = new Connection({
-      requesterId,
-      requesterName: requester.name,
-      requesterAvatar: (requester as any).profile?.profilePhoto, // simplified extraction
-      receiverId,
-      receiverName,
-      status: 'pending',
+    const connection = await prisma.connection.create({
+      data: {
+        requesterId,
+        requesterName: requester.name,
+        requesterAvatar: (requester.profile as any)?.profilePhoto || '', 
+        receiverId,
+        receiverName,
+        status: 'pending',
+      }
     });
 
-    await connection.save();
-    res.json({ success: true, connectionId: connection._id });
+    res.json({ success: true, connectionId: connection.id });
   } catch (err) {
     res.status(500).json({ message: 'Internal server error.' });
   }
@@ -52,8 +54,8 @@ router.post('/request', async (req: AuthRequest, res: Response): Promise<void> =
 // ─── POST /api/connections/:connectionId/respond ─────────────────────────────
 router.post('/:connectionId/respond', async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const { action } = req.body; // accept or reject
-    const connection = await Connection.findById(req.params.connectionId);
+    const { action } = req.body; 
+    const connection = await prisma.connection.findUnique({ where: { id: (req.params.connectionId as string) } });
     if (!connection) { res.status(404).json({ message: 'Connection not found' }); return; }
 
     if (connection.receiverId !== req.userId) {
@@ -61,17 +63,22 @@ router.post('/:connectionId/respond', async (req: AuthRequest, res: Response): P
       return;
     }
 
+    let newStatus = connection.status;
     if (action === 'accept') {
-      connection.status = 'accepted';
+      newStatus = 'accepted';
     } else if (action === 'reject') {
-      connection.status = 'rejected';
+      newStatus = 'rejected';
     } else {
       res.status(400).json({ message: 'Invalid action.' });
       return;
     }
 
-    await connection.save();
-    res.json({ success: true, status: connection.status });
+    await prisma.connection.update({
+      where: { id: connection.id },
+      data: { status: newStatus }
+    });
+
+    res.json({ success: true, status: newStatus });
   } catch (err) {
     res.status(500).json({ message: 'Internal server error.' });
   }
@@ -80,7 +87,7 @@ router.post('/:connectionId/respond', async (req: AuthRequest, res: Response): P
 // ─── POST /api/connections/:connectionId/withdraw ────────────────────────────
 router.post('/:connectionId/withdraw', async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const connection = await Connection.findById(req.params.connectionId);
+    const connection = await prisma.connection.findUnique({ where: { id: (req.params.connectionId as string) } });
     if (!connection) { res.status(404).json({ message: 'Connection not found' }); return; }
 
     if (connection.requesterId !== req.userId || connection.status !== 'pending') {
@@ -88,8 +95,11 @@ router.post('/:connectionId/withdraw', async (req: AuthRequest, res: Response): 
       return;
     }
 
-    connection.status = 'withdrawn';
-    await connection.save();
+    await prisma.connection.update({
+      where: { id: connection.id },
+      data: { status: 'withdrawn' }
+    });
+
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ message: 'Internal server error.' });
@@ -99,7 +109,7 @@ router.post('/:connectionId/withdraw', async (req: AuthRequest, res: Response): 
 // ─── DELETE /api/connections/:connectionId ───────────────────────────────────
 router.delete('/:connectionId', async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const connection = await Connection.findById(req.params.connectionId);
+    const connection = await prisma.connection.findUnique({ where: { id: (req.params.connectionId as string) } });
     if (!connection) { res.status(404).json({ message: 'Connection not found' }); return; }
 
     if (connection.requesterId !== req.userId && connection.receiverId !== req.userId) {
@@ -107,7 +117,7 @@ router.delete('/:connectionId', async (req: AuthRequest, res: Response): Promise
       return;
     }
 
-    await Connection.findByIdAndDelete(req.params.connectionId);
+    await prisma.connection.delete({ where: { id: connection.id } });
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ message: 'Internal server error.' });
@@ -117,28 +127,33 @@ router.delete('/:connectionId', async (req: AuthRequest, res: Response): Promise
 // ─── GET /api/connections/:userId/list ───────────────────────────────────────
 router.get('/:userId/list', async (req: Request, res: Response): Promise<void> => {
   try {
-    const { userId } = req.params;
-    const connections = await Connection.find({
-      $or: [{ requesterId: userId }, { receiverId: userId }],
-      status: 'accepted',
+    const userId = req.params.userId as string;
+    const connections = await prisma.connection.findMany({
+      where: {
+        OR: [{ requesterId: userId }, { receiverId: userId }],
+        status: 'accepted',
+      }
     });
 
-    // Batch fetch all related users in ONE query instead of N individual queries
     const otherIds = connections.map(c =>
       c.requesterId === userId ? c.receiverId : c.requesterId
     );
-    const users = await User.find({ _id: { $in: otherIds } }).select('name accountType profile');
-    const userMap = new Map(users.map(u => [u._id.toString(), u]));
+    const users = await prisma.user.findMany({ 
+      where: { id: { in: otherIds } },
+      select: { id: true, name: true, accountType: true, profile: true }
+    });
+    
+    const userMap = new Map(users.map(u => [u.id, u]));
 
     const mapped = connections.map((c) => {
       const isRequester = c.requesterId === userId;
       const otherId = isRequester ? c.receiverId : c.requesterId;
       const otherUser = userMap.get(otherId);
       return {
-        connectionId: c._id,
+        connectionId: c.id,
         userId: otherId,
         name: otherUser?.name || 'Unknown User',
-        avatar: (otherUser as any)?.profile?.profilePhoto,
+        avatar: (otherUser?.profile as any)?.profilePhoto,
         role: otherUser?.accountType,
       };
     });
@@ -152,10 +167,13 @@ router.get('/:userId/list', async (req: Request, res: Response): Promise<void> =
 // ─── GET /api/connections/:userId/pending ────────────────────────────────────
 router.get('/:userId/pending', async (req: Request, res: Response): Promise<void> => {
   try {
-    const pendingRequests = await Connection.find({
-      receiverId: req.params.userId,
-      status: 'pending',
-    }).sort({ createdAt: -1 });
+    const pendingRequests = await prisma.connection.findMany({
+      where: {
+        receiverId: (req.params.userId as string),
+        status: 'pending',
+      },
+      orderBy: { createdAt: 'desc' }
+    });
 
     res.json({ success: true, pendingRequests });
   } catch (err) {
@@ -172,12 +190,15 @@ router.get('/status', async (req: Request, res: Response): Promise<void> => {
     const uId = userId as string;
     const tId = targetId as string;
 
-    const connection = await Connection.findOne({
-      $or: [
-        { requesterId: uId, receiverId: tId },
-        { requesterId: tId, receiverId: uId },
-      ],
-    }).sort({ createdAt: -1 });
+    const connection = await prisma.connection.findFirst({
+      where: {
+        OR: [
+          { requesterId: uId, receiverId: tId },
+          { requesterId: tId, receiverId: uId },
+        ]
+      },
+      orderBy: { createdAt: 'desc' }
+    });
 
     if (!connection) {
       res.json({ success: true, status: 'none', connectionId: null });
@@ -187,8 +208,8 @@ router.get('/status', async (req: Request, res: Response): Promise<void> => {
     res.json({
       success: true,
       status: connection.status,
-      connectionId: connection._id,
-      direction: connection.requesterId === userId ? 'sent' : 'received',
+      connectionId: connection.id,
+      direction: connection.requesterId === uId ? 'sent' : 'received',
     });
   } catch (err) {
     res.status(500).json({ message: 'Internal server error.' });

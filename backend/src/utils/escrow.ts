@@ -1,6 +1,4 @@
-import Event from '../models/Event';
-import Registration from '../models/Registration';
-import User from '../models/User';
+import prisma from '../db/prisma';
 import { sendRefundEmail, sendReleaseEmail } from './email';
 
 /**
@@ -9,7 +7,7 @@ import { sendRefundEmail, sendReleaseEmail } from './email';
  */
 export async function settleEscrow(eventId: string): Promise<void> {
   try {
-    const event = await Event.findById(eventId).populate<{ organizerId: { _id: string; name: string; email: string } }>('organizerId');
+    const event = await prisma.event.findUnique({ where: { id: eventId } });
     if (!event) {
       console.error(`[escrow] Event ${eventId} not found`);
       return;
@@ -20,13 +18,16 @@ export async function settleEscrow(eventId: string): Promise<void> {
       return;
     }
 
-    const registrations = await Registration.find({ eventId, paymentStatus: 'held' })
-      .populate<{ userId: { _id: string; name: string; email: string } }>('userId');
+    const registrations = await prisma.registration.findMany({ 
+      where: { eventId, paymentStatus: 'held' }
+    });
 
     const total = registrations.length;
     if (total === 0) {
-      event.status = 'completed';
-      await event.save();
+      await prisma.event.update({
+        where: { id: event.id },
+        data: { status: 'completed' }
+      });
       return;
     }
 
@@ -40,30 +41,42 @@ export async function settleEscrow(eventId: string): Promise<void> {
       // ─── Release funds to organizer ───────────────────────────────────
       const totalEscrow = registrations.reduce((sum, r) => sum + r.amountPaid, 0);
 
-      await Registration.updateMany(
-        { eventId, paymentStatus: 'held' },
-        { $set: { paymentStatus: 'released', status: 'completed' } }
-      );
+      await prisma.registration.updateMany({
+        where: { eventId, paymentStatus: 'held' },
+        data: { paymentStatus: 'released', status: 'completed' }
+      });
 
-      event.status = 'completed';
-      event.escrowAmount = 0;
-      await event.save();
+      await prisma.event.update({
+        where: { id: event.id },
+        data: { status: 'completed', escrowAmount: 0 }
+      });
 
       // Notify organizer
-      const organizer = event.organizerId as { name: string; email: string };
-      await sendReleaseEmail(organizer.email, organizer.name, event.title, totalEscrow);
+      const organizer = await prisma.user.findUnique({ where: { id: event.organizerId } });
+      if (organizer) {
+        await sendReleaseEmail(organizer.email, organizer.name, event.title, totalEscrow);
+      }
 
       console.log(`[escrow] ✅ Released ₹${totalEscrow} to organizer for "${event.title}"`);
     } else {
       // ─── Issue full refunds to all attendees ───────────────────────────
-      event.status = 'refunded';
-      event.escrowAmount = 0;
-      await event.save();
+      await prisma.event.update({
+        where: { id: event.id },
+        data: { status: 'refunded', escrowAmount: 0 }
+      });
+
+      const userIds = registrations.map(r => r.userId);
+      const users = await prisma.user.findMany({ where: { id: { in: userIds } } });
 
       for (const reg of registrations) {
-        await Registration.findByIdAndUpdate(reg._id, { paymentStatus: 'refunded', status: 'refunded' });
-        const attendee = reg.userId as { name: string; email: string };
-        await sendRefundEmail(attendee.email, attendee.name, event.title, reg.amountPaid);
+        await prisma.registration.update({
+          where: { id: reg.id },
+          data: { paymentStatus: 'refunded', status: 'refunded' }
+        });
+        const attendee = users.find(u => u.id === reg.userId);
+        if (attendee) {
+          await sendRefundEmail(attendee.email, attendee.name, event.title, reg.amountPaid);
+        }
       }
 
       console.log(`[escrow] ❌ Threshold not met for "${event.title}". Refunded ${total} attendees.`);

@@ -1,19 +1,26 @@
 import { Router, Request, Response } from 'express';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
-import User from '../models/User';
+import prisma from '../db/prisma';
 import { extractInterests } from '../utils/extractInterests';
 import { generateOTP, sendOTPEmail } from '../utils/email';
 
 const router = Router();
 
-// In-memory OTP store for experience verification
-// Format: { `${userId}_${experienceId}`: { otp, email, expiresAt } }
 const expVerifyOtpStore = new Map<string, { otp: string; email: string; expiresAt: number }>();
 
 // ─── GET /api/profile/me — own full profile (authenticated) ────────────────────
 router.get('/me', authMiddleware, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const user = await User.findById(req.userId).select('-passwordHash -facePointId');
+    const user = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: {
+        id: true, name: true, email: true, accountType: true,
+        companyName: true, cin: true, gstin: true,
+        isVerifiedCompany: true, isVerified: true, profile: true, interests: true,
+        referralCode: true, referralCount: true, verifiedReferralCount: true, promoCredits: true,
+        milestoneBadges: true, isDigilockerVerified: true, digilockerData: true, createdAt: true
+      }
+    });
     if (!user) { res.status(404).json({ message: 'User not found.' }); return; }
     res.json({ user });
   } catch (err) {
@@ -22,11 +29,17 @@ router.get('/me', authMiddleware, async (req: AuthRequest, res: Response): Promi
 });
 
 // ─── GET /api/profile/:userId — public profile ────────────────────────────────
-// NOTE: No auth required — profile photo and info are public
 router.get('/:userId', async (req: Request, res: Response): Promise<void> => {
   try {
-    const user = await User.findById(req.params.userId)
-      .select('-passwordHash -facePointId -email');
+    const user = await prisma.user.findUnique({
+      where: { id: req.params.userId as string },
+      select: {
+        id: true, name: true, accountType: true,
+        companyName: true,
+        isVerifiedCompany: true, profile: true, interests: true,
+        milestoneBadges: true, isDigilockerVerified: true, createdAt: true
+      }
+    });
     if (!user) { res.status(404).json({ message: 'User not found.' }); return; }
     res.json({ user });
   } catch (err) {
@@ -37,10 +50,9 @@ router.get('/:userId', async (req: Request, res: Response): Promise<void> => {
 // ─── PATCH /api/profile — update own profile sections ────────────────────────
 router.patch('/', authMiddleware, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const user = await User.findById(req.userId);
+    const user = await prisma.user.findUnique({ where: { id: req.userId } });
     if (!user) { res.status(404).json({ message: 'User not found.' }); return; }
 
-    // Whitelist of profile fields that can be updated
     const allowedFields = [
       'headline', 'summary', 'location', 'pronouns', 'website',
       'openToWork', 'openToWorkTypes',
@@ -49,14 +61,13 @@ router.patch('/', authMiddleware, async (req: AuthRequest, res: Response): Promi
       'projects', 'publications', 'honors', 'languages', 'volunteer', 'courses',
     ];
 
-    const updates: Record<string, any> = {};
+    let currentProfile = (user.profile as any) || {};
+    
     for (const field of allowedFields) {
       if (req.body[field] !== undefined) {
-        // For experience, preserve isVerified and companyEmail from existing entries
         if (field === 'experience' && Array.isArray(req.body[field])) {
-          const existingExp = (user.profile as any)?.experience || [];
-          const newExp = req.body[field].map((exp: any) => {
-            // Match by _id to preserve verification status
+          const existingExp = currentProfile.experience || [];
+          currentProfile.experience = req.body[field].map((exp: any) => {
             if (exp._id) {
               const existing = existingExp.find((e: any) => e._id?.toString() === exp._id);
               if (existing) {
@@ -69,27 +80,30 @@ router.patch('/', authMiddleware, async (req: AuthRequest, res: Response): Promi
             }
             return { ...exp, isVerified: false, companyEmail: '' };
           });
-          updates[`profile.${field}`] = newExp;
         } else {
-          updates[`profile.${field}`] = req.body[field];
+          currentProfile[field] = req.body[field];
         }
       }
     }
 
-    // Handle name at top level
-    if (req.body.name) updates['name'] = req.body.name;
+    const dataToUpdate: any = { profile: currentProfile };
+    if (req.body.name) dataToUpdate.name = req.body.name;
 
-    await User.findByIdAndUpdate(req.userId, { $set: updates });
+    const newInterests = extractInterests(currentProfile);
+    dataToUpdate.interests = newInterests;
 
-    // Re-fetch updated profile and auto-extract interests
-    const updated = await User.findById(req.userId);
-    if (updated && updated.profile) {
-      const newInterests = extractInterests(updated.profile as Record<string, any>);
-      updated.interests = newInterests;
-      await updated.save();
-    }
+    const result = await prisma.user.update({
+      where: { id: req.userId },
+      data: dataToUpdate,
+      select: {
+        id: true, name: true, email: true, accountType: true,
+        companyName: true, cin: true, gstin: true,
+        isVerifiedCompany: true, isVerified: true, profile: true, interests: true,
+        referralCode: true, referralCount: true, verifiedReferralCount: true, promoCredits: true,
+        milestoneBadges: true, isDigilockerVerified: true, digilockerData: true, createdAt: true
+      }
+    });
 
-    const result = await User.findById(req.userId).select('-passwordHash -facePointId');
     res.json({ message: 'Profile updated successfully.', user: result });
   } catch (err) {
     console.error('[profile:update]', err);
@@ -100,14 +114,26 @@ router.patch('/', authMiddleware, async (req: AuthRequest, res: Response): Promi
 // ─── PATCH /api/profile/photo — update profile or cover photo ────────────────
 router.patch('/photo', authMiddleware, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const { type, data } = req.body; // type: 'profile' | 'cover', data: base64
+    const { type, data } = req.body;
     if (!type || !data || !['profile', 'cover'].includes(type)) {
       res.status(400).json({ message: 'type (profile|cover) and data (base64) are required.' });
       return;
     }
 
-    const field = type === 'profile' ? 'profile.profilePhoto' : 'profile.coverPhoto';
-    await User.findByIdAndUpdate(req.userId, { $set: { [field]: data } });
+    const user = await prisma.user.findUnique({ where: { id: req.userId } });
+    if (!user) { res.status(404).json({ message: 'User not found.' }); return; }
+
+    const currentProfile = (user.profile as any) || {};
+    if (type === 'profile') {
+      currentProfile.profilePhoto = data;
+    } else {
+      currentProfile.coverPhoto = data;
+    }
+
+    await prisma.user.update({
+      where: { id: req.userId },
+      data: { profile: currentProfile }
+    });
 
     res.json({ message: `${type === 'profile' ? 'Profile' : 'Cover'} photo updated.` });
   } catch (err) {
@@ -124,14 +150,12 @@ router.post('/experience/verify-request', authMiddleware, async (req: AuthReques
       return;
     }
 
-    // Validate email format
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(companyEmail)) {
       res.status(400).json({ message: 'Invalid email format.' });
       return;
     }
 
-    // Block personal email domains
     const blockedDomains = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'protonmail.com', 'aol.com', 'icloud.com', 'mail.com', 'zoho.com', 'yandex.com'];
     const emailDomain = companyEmail.split('@')[1]?.toLowerCase();
     if (blockedDomains.includes(emailDomain)) {
@@ -139,10 +163,9 @@ router.post('/experience/verify-request', authMiddleware, async (req: AuthReques
       return;
     }
 
-    const user = await User.findById(req.userId);
+    const user = await prisma.user.findUnique({ where: { id: req.userId } });
     if (!user) { res.status(404).json({ message: 'User not found.' }); return; }
 
-    // Check experienceId exists
     const experience = (user.profile as any)?.experience || [];
     const expEntry = experience.find((e: any) => e._id?.toString() === experienceId);
     if (!expEntry) {
@@ -155,16 +178,14 @@ router.post('/experience/verify-request', authMiddleware, async (req: AuthReques
       return;
     }
 
-    // Generate OTP and store
     const otp = generateOTP();
     const key = `${req.userId}_${experienceId}`;
     expVerifyOtpStore.set(key, {
       otp,
       email: companyEmail,
-      expiresAt: Date.now() + 10 * 60 * 1000, // 10 minutes
+      expiresAt: Date.now() + 10 * 60 * 1000,
     });
 
-    // Send OTP via email
     await sendOTPEmail(companyEmail, user.name, otp);
 
     res.json({ success: true, message: `Verification code sent to ${companyEmail}` });
@@ -202,19 +223,38 @@ router.post('/experience/verify-confirm', authMiddleware, async (req: AuthReques
       return;
     }
 
-    // Mark experience as verified
-    await User.updateOne(
-      { _id: req.userId, 'profile.experience._id': experienceId },
-      { $set: {
-        'profile.experience.$.isVerified': true,
-        'profile.experience.$.companyEmail': stored.email,
-      }}
-    );
+    const user = await prisma.user.findUnique({ where: { id: req.userId } });
+    if (!user) { res.status(404).json({ message: 'User not found.' }); return; }
+
+    const currentProfile = (user.profile as any) || {};
+    const experience = currentProfile.experience || [];
+    
+    currentProfile.experience = experience.map((e: any) => {
+      if (e._id?.toString() === experienceId) {
+        return { ...e, isVerified: true, companyEmail: stored.email };
+      }
+      return e;
+    });
+
+    await prisma.user.update({
+      where: { id: req.userId },
+      data: { profile: currentProfile }
+    });
 
     expVerifyOtpStore.delete(key);
 
-    const user = await User.findById(req.userId).select('-passwordHash -facePointId');
-    res.json({ success: true, message: 'Experience verified successfully!', user });
+    const updatedUser = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: {
+        id: true, name: true, email: true, accountType: true,
+        companyName: true, cin: true, gstin: true,
+        isVerifiedCompany: true, isVerified: true, profile: true, interests: true,
+        referralCode: true, referralCount: true, verifiedReferralCount: true, promoCredits: true,
+        milestoneBadges: true, isDigilockerVerified: true, digilockerData: true, createdAt: true
+      }
+    });
+
+    res.json({ success: true, message: 'Experience verified successfully!', user: updatedUser });
   } catch (err) {
     console.error('[exp-verify:confirm]', err);
     res.status(500).json({ message: 'Verification failed. Please try again.' });

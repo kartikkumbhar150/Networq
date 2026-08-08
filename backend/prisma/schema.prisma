@@ -21,7 +21,6 @@ model User {
   gstin                 String?
 
   isVerifiedCompany     Boolean   @default(false)
-  facePointId           String?
   isVerified            Boolean   @default(false)
   profile               Json      @default("{}") // Store profile object here to avoid massive relations
   interests             String[]  @default([])
@@ -265,8 +264,6 @@ model PendingUser {
   companyDetails      Json?
   otp                 String
   otpExpiry           DateTime
-  faceEmbeddingStored Boolean   @default(false)
-  tempQdrantPointId   String?
   enteredReferralCode String?
 
   createdAt           DateTime  @default(now())

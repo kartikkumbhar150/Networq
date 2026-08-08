@@ -2,16 +2,9 @@ import { Router, Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { v4 as uuidv4 } from 'uuid';
-import User from '../models/User';
-import PendingUser from '../models/PendingUser';
-import Transaction from '../models/Transaction';
+import prisma from '../db/prisma';
 import { generateOTP, sendOTPEmail } from '../utils/email';
-import {
-  checkLiveness,
-  extractEmbedding,
-  checkDuplicate,
-  storeEmbedding,
-} from '../utils/fastapi';
+import { checkLiveness } from '../utils/fastapi';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
 import { verifyCompanyBackground } from '../utils/verifyCompany';
 import passport from '../utils/passport';
@@ -29,15 +22,14 @@ function signJWT(userId: string, email: string, accountType: string): string {
 
 // ─── FRAUD-RESISTANT MILESTONE REWARDS ENGINE ────────────────────────────────
 async function processVerifiedReferral(referralCode: string, verifiedUserName: string) {
-  const referrer = await User.findOne({ referralCode });
+  const referrer = await prisma.user.findUnique({ where: { referralCode } });
   if (!referrer) return;
 
-  referrer.verifiedReferralCount += 1;
-  const count = referrer.verifiedReferralCount;
-
+  const count = referrer.verifiedReferralCount + 1;
   let earnedBadge = '';
   let transactionDesc = '';
   let bonus = 0;
+  let hasReached1000 = referrer.hasReached1000MilestoneAt;
 
   if (count === 100) {
     earnedBadge = '100 Verified Joins Club';
@@ -50,22 +42,31 @@ async function processVerifiedReferral(referralCode: string, verifiedUserName: s
   } else if (count === 1000) {
     earnedBadge = '1K Club Mega Referrer';
     transactionDesc = 'Fastest 1,000 Verified Joins Entry Unlocked!';
-    referrer.hasReached1000MilestoneAt = new Date();
+    hasReached1000 = new Date();
   }
+
+  const updatedBadges = earnedBadge ? [...referrer.milestoneBadges, earnedBadge] : referrer.milestoneBadges;
+
+  await prisma.user.update({
+    where: { id: referrer.id },
+    data: {
+      verifiedReferralCount: count,
+      milestoneBadges: updatedBadges,
+      promoCredits: referrer.promoCredits + bonus,
+      hasReached1000MilestoneAt: hasReached1000,
+    }
+  });
 
   if (earnedBadge || bonus > 0) {
-    if (earnedBadge) referrer.milestoneBadges.push(earnedBadge);
-    if (bonus > 0) referrer.promoCredits += bonus;
-
-    await Transaction.create({
-      userId: referrer.id,
-      type: 'milestone',
-      amount: bonus,
-      description: transactionDesc
+    await prisma.transaction.create({
+      data: {
+        userId: referrer.id,
+        type: 'milestone',
+        amount: bonus,
+        description: transactionDesc
+      }
     });
   }
-
-  await referrer.save();
 }
 
 // ─── POST /api/auth/signup ──────────────────────────────────────────────────
@@ -80,14 +81,14 @@ router.post('/signup', async (req: Request, res: Response): Promise<void> => {
     }
 
     // Check if email already exists in users
-    const existingUser = await User.findOne({ email: email.toLowerCase() });
+    const existingUser = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
     if (existingUser) {
       res.status(409).json({ message: 'An account with this email already exists.' });
       return;
     }
 
     // Remove existing pending user if re-attempting
-    await PendingUser.deleteOne({ email: email.toLowerCase() });
+    await prisma.pendingUser.deleteMany({ where: { email: email.toLowerCase() } });
 
     // 1. Hash password
     const passwordHash = await bcrypt.hash(password, 12);
@@ -97,16 +98,16 @@ router.post('/signup', async (req: Request, res: Response): Promise<void> => {
     const otpExpiry = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000);
 
     // 3. Save pending user (no face data needed)
-    await PendingUser.create({
-      name,
-      email: email.toLowerCase(),
-      passwordHash,
-      accountType: accountType === 'company' ? 'company' : 'user',
-      companyDetails: accountType === 'company' ? { companyName, cin, gstin } : undefined,
-      otp,
-      otpExpiry,
-      faceEmbeddingStored: false,
-      tempQdrantPointId: null,
+    await prisma.pendingUser.create({
+      data: {
+        name,
+        email: email.toLowerCase(),
+        passwordHash,
+        accountType: accountType === 'company' ? 'company' : 'user',
+        companyDetails: accountType === 'company' ? { companyName, cin, gstin } : undefined,
+        otp,
+        otpExpiry,
+      }
     });
 
     // 4. Send OTP email
@@ -130,7 +131,7 @@ router.post('/verify-otp', async (req: Request, res: Response): Promise<void> =>
       return;
     }
 
-    const pending = await PendingUser.findOne({ email: email.toLowerCase() });
+    const pending = await prisma.pendingUser.findUnique({ where: { email: email.toLowerCase() } });
     if (!pending) {
       res.status(404).json({ message: 'No pending signup found. Please start over.' });
       return;
@@ -142,69 +143,80 @@ router.post('/verify-otp', async (req: Request, res: Response): Promise<void> =>
     }
 
     if (new Date() > pending.otpExpiry) {
-      await PendingUser.deleteOne({ email: email.toLowerCase() });
+      await prisma.pendingUser.deleteMany({ where: { email: email.toLowerCase() } });
       res.status(400).json({ message: 'OTP has expired. Please start over.' });
       return;
     }
 
     // Generate unique referral code: UPPERCASE 8 chars.
     const newRefCode = uuidv4().replace(/-/g, '').substring(0, 8).toUpperCase();
+    const cd = pending.companyDetails as any;
 
-    // Create the verified user in MongoDB
-    const user = await User.create({
-      name: pending.name,
-      email: pending.email,
-      passwordHash: pending.passwordHash,
-      accountType: pending.accountType,
-      companyDetails: pending.companyDetails,
-      facePointId: pending.tempQdrantPointId,
-      isVerified: true,
-      referralCode: newRefCode,
-      referredBy: referralCode || pending.enteredReferralCode,
+    // Create the verified user in PostgreSQL
+    const user = await prisma.user.create({
+      data: {
+        name: pending.name,
+        email: pending.email,
+        passwordHash: pending.passwordHash,
+        accountType: pending.accountType,
+        companyName: cd?.companyName,
+        cin: cd?.cin,
+        gstin: cd?.gstin,
+        isVerified: true,
+        referralCode: newRefCode,
+        referredBy: referralCode || pending.enteredReferralCode,
+      }
     });
 
     // Handle Referral Payouts securely
     const codeToCredit = referralCode || pending.enteredReferralCode;
     if (codeToCredit) {
-      const referrer = await User.findOne({ referralCode: codeToCredit });
+      const referrer = await prisma.user.findUnique({ where: { referralCode: codeToCredit } });
       if (referrer) {
         // Base Grant
-        referrer.promoCredits += 500;
-        referrer.referralCount += 1;
+        const updatedCredits = referrer.promoCredits + 500;
+        const count = referrer.referralCount + 1;
         
         let milestoneBonus = 0;
         let earnedBadge = '';
         
         // Milestone Triggers
-        if (referrer.referralCount === 5) {
+        if (count === 5) {
            milestoneBonus = 2500;
            earnedBadge = 'Connector';
-        } else if (referrer.referralCount === 10) {
+        } else if (count === 10) {
            milestoneBonus = 5000;
            earnedBadge = 'Bronze Networker';
-        } else if (referrer.referralCount === 25) {
+        } else if (count === 25) {
            milestoneBonus = 15000;
            earnedBadge = 'Silver Influencer';
-        } else if (referrer.referralCount === 50) {
+        } else if (count === 50) {
            milestoneBonus = 40000;
            earnedBadge = 'Gold Ambassador';
         }
 
+        const badges = earnedBadge ? [...referrer.milestoneBadges, earnedBadge] : referrer.milestoneBadges;
+
+        await prisma.user.update({
+          where: { id: referrer.id },
+          data: {
+            promoCredits: updatedCredits + milestoneBonus,
+            referralCount: count,
+            milestoneBadges: badges,
+          }
+        });
+
         if (milestoneBonus > 0) {
-           referrer.promoCredits += milestoneBonus;
-           referrer.milestoneBadges.push(earnedBadge);
-           await Transaction.create({ userId: referrer.id, type: 'milestone', amount: milestoneBonus, description: `Milestone Unlocked: ${earnedBadge} (${referrer.referralCount} referrals)` });
+           await prisma.transaction.create({ data: { userId: referrer.id, type: 'milestone', amount: milestoneBonus, description: `Milestone Unlocked: ${earnedBadge} (${count} referrals)` } });
         }
 
-        await referrer.save();
-
         // Log base transaction
-        await Transaction.create({ userId: referrer.id, type: 'referral', amount: 500, description: `Referral bonus for verifying ${user.name}` });
+        await prisma.transaction.create({ data: { userId: referrer.id, type: 'referral', amount: 500, description: `Referral bonus for verifying ${user.name}` } });
       }
     }
 
     // Clean up pending
-    await PendingUser.deleteOne({ email: email.toLowerCase() });
+    await prisma.pendingUser.deleteMany({ where: { email: email.toLowerCase() } });
 
     // Trigger async company verification if applicable
     if (user.accountType === 'company') {
@@ -232,6 +244,7 @@ router.post('/verify-otp', async (req: Request, res: Response): Promise<void> =>
       },
     });
   } catch (error) {
+    console.error(error);
     res.status(500).json({ message: 'Internal server error.' });
   }
 });
@@ -258,14 +271,12 @@ router.post('/liveness', authMiddleware, async (req: AuthRequest, res: Response)
       return;
     }
     
-    const user = await User.findById(req.userId);
-    if (user && !user.facePointId && !user.isDigilockerVerified && user.referredBy) {
+    const user = await prisma.user.findUnique({ where: { id: req.userId } });
+    if (user && !user.isDigilockerVerified && user.referredBy) {
+      // NOTE: Removed facePointId check since Qdrant is removed
       await processVerifiedReferral(user.referredBy, user.name);
     }
 
-    // Mark user as human verified with a mock ID
-    await User.findByIdAndUpdate(req.userId, { facePointId: 'verified_human_liveness_only' });
-    
     res.json({ success: true, message: 'Liveness verified.' });
   } catch (error) {
     console.error('[liveness]', error);
@@ -282,7 +293,7 @@ router.post('/login', async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
-    const user = await User.findOne({ email: email.toLowerCase() });
+    const user = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
     if (!user) {
       res.status(401).json({ message: 'Invalid email or password.' });
       return;
@@ -327,7 +338,7 @@ router.post('/login', async (req: Request, res: Response): Promise<void> => {
         email: user.email,
         accountType: user.accountType,
         isVerifiedCompany: user.isVerifiedCompany,
-        companyDetails: user.companyDetails,
+        companyDetails: { companyName: user.companyName, cin: user.cin, gstin: user.gstin },
       },
     });
   } catch (error) {
@@ -339,21 +350,18 @@ router.post('/login', async (req: Request, res: Response): Promise<void> => {
 // ─── GET /api/auth/me ────────────────────────────────────────────────────────
 router.get('/me', authMiddleware, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const user = await User.findById(req.userId).select('-passwordHash -facePointId');
+    const user = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: {
+        id: true, name: true, email: true, accountType: true,
+        isVerifiedCompany: true, referralCode: true,
+      }
+    });
     if (!user) {
       res.status(404).json({ message: 'User not found.' });
       return;
     }
-    res.json({
-      user: {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        accountType: user.accountType,
-        isVerifiedCompany: user.isVerifiedCompany,
-        referralCode: (user as any).referralCode,
-      }
-    });
+    res.json({ user });
   } catch (error) {
     console.error('[me]', error);
     res.status(500).json({ message: 'Internal server error.' });
@@ -409,14 +417,10 @@ router.get(
 );
 
 // ─── DIGILOCKER: IDENTITY VERIFICATION ───────────────────────────────────────
-// DigiLocker uses OAuth 2.0 via India's Meri Pehchaan gateway.
-// Docs: https://partners.digitallocker.gov.in/public/oauth2/1/authorize
-
 const DIGILOCKER_AUTH_URL = 'https://digilocker.meripehchaan.gov.in/public/oauth2/1/authorize';
 const DIGILOCKER_TOKEN_URL = 'https://digilocker.meripehchaan.gov.in/public/oauth2/2/token';
 const DIGILOCKER_USER_URL = 'https://digilocker.meripehchaan.gov.in/public/oauth2/1/user';
 
-// Step 1: Redirect to DigiLocker authorization page
 router.get('/digilocker', authMiddleware, (req: AuthRequest, res: Response) => {
   const clientId = process.env.DIGILOCKER_CLIENT_ID;
   const redirectUri = process.env.DIGILOCKER_REDIRECT_URI;
@@ -426,20 +430,12 @@ router.get('/digilocker', authMiddleware, (req: AuthRequest, res: Response) => {
     return;
   }
 
-  // Store the userId in session so we can link it back after callback
   (req as any).session.digilockerUserId = req.userId;
 
-  const authUrl = `${DIGILOCKER_AUTH_URL}?` +
-    `response_type=code` +
-    `&client_id=${encodeURIComponent(clientId)}` +
-    `&redirect_uri=${encodeURIComponent(redirectUri)}` +
-    `&state=${req.userId}` +
-    `&scope=openid`;
-
+  const authUrl = `${DIGILOCKER_AUTH_URL}?response_type=code&client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${req.userId}&scope=openid`;
   res.redirect(authUrl);
 });
 
-// Step 2: Handle DigiLocker callback
 router.get('/digilocker/callback', async (req: Request, res: Response): Promise<void> => {
   const { code, state: userId } = req.query;
   const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
@@ -454,7 +450,6 @@ router.get('/digilocker/callback', async (req: Request, res: Response): Promise<
     const clientSecret = process.env.DIGILOCKER_CLIENT_SECRET!;
     const redirectUri = process.env.DIGILOCKER_REDIRECT_URI!;
 
-    // Exchange authorization code for access token
     const tokenResponse = await fetch(DIGILOCKER_TOKEN_URL, {
       method: 'POST',
       headers: {
@@ -469,7 +464,6 @@ router.get('/digilocker/callback', async (req: Request, res: Response): Promise<
     });
 
     if (!tokenResponse.ok) {
-      console.error('[digilocker] Token exchange failed:', await tokenResponse.text());
       res.redirect(`${frontendUrl}/signup?digilocker=error&reason=token_exchange_failed`);
       return;
     }
@@ -477,30 +471,25 @@ router.get('/digilocker/callback', async (req: Request, res: Response): Promise<
     const tokenData = await tokenResponse.json();
     const accessToken = tokenData.access_token;
 
-    // Fetch user details from DigiLocker
     const userResponse = await fetch(DIGILOCKER_USER_URL, {
-      headers: {
-        'Authorization': `Bearer ${accessToken}`
-      }
+      headers: { 'Authorization': `Bearer ${accessToken}` }
     });
 
     if (!userResponse.ok) {
-      console.error('[digilocker] User fetch failed:', await userResponse.text());
       res.redirect(`${frontendUrl}/signup?digilocker=error&reason=user_fetch_failed`);
       return;
     }
 
     const digilockerUser = await userResponse.json();
 
-    const existingUser = await User.findById(userId);
-    if (existingUser && !existingUser.isDigilockerVerified && !existingUser.facePointId && existingUser.referredBy) {
+    const existingUser = await prisma.user.findUnique({ where: { id: userId as string } });
+    if (existingUser && !existingUser.isDigilockerVerified && existingUser.referredBy) {
        await processVerifiedReferral(existingUser.referredBy, existingUser.name);
     }
 
-    // Update user with verified DigiLocker identity
-    const updatedUser = await User.findByIdAndUpdate(
-      userId,
-      {
+    const updatedUser = await prisma.user.update({
+      where: { id: userId as string },
+      data: {
         isDigilockerVerified: true,
         digilockerData: {
           aadhaarName: digilockerUser.name || digilockerUser.digilockerid,
@@ -509,76 +498,70 @@ router.get('/digilocker/callback', async (req: Request, res: Response): Promise<
           digilockerId: digilockerUser.digilockerid,
           verifiedAt: new Date()
         }
-      },
-      { new: true }
-    );
+      }
+    });
 
-    if (!updatedUser) {
-      res.redirect(`${frontendUrl}/signup?digilocker=error&reason=user_not_found`);
-      return;
-    }
-
-    console.log(`[digilocker] User ${userId} verified as: ${digilockerUser.name}`);
     res.redirect(`${frontendUrl}/feed?digilocker=success`);
 
   } catch (error) {
-    console.error('[digilocker] Error:', error);
     res.redirect(`${frontendUrl}/signup?digilocker=error&reason=internal_error`);
   }
 });
 
-// ─── GET /api/auth/digilocker/status ─────────────────────────────────────────
-// Check if current user is DigiLocker verified
 router.get('/digilocker/status', authMiddleware, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const user = await User.findById(req.userId).select('isDigilockerVerified digilockerData name');
+    const user = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: { isDigilockerVerified: true, digilockerData: true, name: true }
+    });
     if (!user) {
       res.status(404).json({ success: false, message: 'User not found.' });
       return;
     }
+    const dData = user.digilockerData as any;
     res.json({
       success: true,
       isVerified: user.isDigilockerVerified,
       digilockerData: user.digilockerData,
-      nameMatch: user.digilockerData?.aadhaarName
-        ? user.name.toLowerCase().includes(user.digilockerData.aadhaarName.split(' ')[0].toLowerCase())
+      nameMatch: dData?.aadhaarName
+        ? user.name.toLowerCase().includes(dData.aadhaarName.split(' ')[0].toLowerCase())
         : null
     });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Internal server error.' });
   }
 });
-// ─── DEMO: Simulate DigiLocker Verification (for hackathon) ──────────────────
+
 router.post('/digilocker/demo-verify', authMiddleware, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const user = await User.findById(req.userId);
+    const user = await prisma.user.findUnique({ where: { id: req.userId } });
     if (!user) {
       res.status(404).json({ success: false, message: 'User not found.' });
       return;
     }
 
-    if (!user.isDigilockerVerified && !user.facePointId && user.referredBy) {
+    if (!user.isDigilockerVerified && user.referredBy) {
        await processVerifiedReferral(user.referredBy, user.name);
     }
 
-    await User.findByIdAndUpdate(req.userId, {
-      isDigilockerVerified: true,
-      digilockerData: {
-        aadhaarName: user.name,
-        dob: '1999-01-01',
-        gender: 'M',
-        digilockerId: `DL-${user._id.toString().slice(-8).toUpperCase()}`,
-        verifiedAt: new Date()
+    await prisma.user.update({
+      where: { id: req.userId },
+      data: {
+        isDigilockerVerified: true,
+        digilockerData: {
+          aadhaarName: user.name,
+          dob: '1999-01-01',
+          gender: 'M',
+          digilockerId: `DL-${user.id.slice(-8).toUpperCase()}`,
+          verifiedAt: new Date()
+        }
       }
     });
 
-    console.log(`[digilocker-demo] User ${req.userId} marked as verified`);
     res.json({ success: true, message: 'Identity verified via DigiLocker (demo).' });
   } catch (error) {
-    console.error('[digilocker-demo]', error);
     res.status(500).json({ success: false, message: 'Internal server error.' });
   }
 });
 
 export default router;
-

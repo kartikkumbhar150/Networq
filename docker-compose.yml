@@ -1,18 +1,6 @@
 version: "3.8"
 
 services:
-  qdrant:
-    image: qdrant/qdrant:latest
-    container_name: hirex_qdrant
-    restart: unless-stopped
-    ports:
-      - "6333:6333"   # REST API  → http://localhost:6333
-      - "6334:6334"   # gRPC API  → localhost:6334
-    volumes:
-      - qdrant_storage:/qdrant/storage
-    environment:
-      - QDRANT__LOG_LEVEL=INFO
-
   redis:
     image: redis:alpine
     container_name: hirex_redis
@@ -46,13 +34,9 @@ services:
     restart: unless-stopped
     ports:
       - "8000:8000"
-    depends_on:
-      - qdrant
     env_file:
       - ./python/.env
 
 volumes:
-  qdrant_storage:
-    driver: local
   redis_data:
     driver: local

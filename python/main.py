@@ -16,13 +16,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from face_utils.liveness import check_liveness
-from face_utils.qdrant_store import (
-    ensure_collection,
-    base64_to_cv2,
-    extract_arcface_embedding,
-    check_duplicate_face,
-    store_face_embedding,
-)
 
 # ─── Lifespan (replaces deprecated @app.on_event) ────────────────────────────
 @asynccontextmanager
@@ -37,12 +30,9 @@ async def lifespan(app: FastAPI):
     print("==========================================================")
     print()
     try:
-        ensure_collection()
         print("  [OK] All systems go. HireX ML Service is ready.\n")
     except Exception as e:
-        print(f"  [WARN] Qdrant unavailable: {e}")
-        print("  Server started but face dedup endpoints will fail.")
-        print("  -> Make sure Docker is running: docker-compose up -d\n")
+        print(f"  [WARN] Exception: {e}")
 
     yield  # ← server runs here
 
@@ -52,7 +42,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="HireX ML Service",
-    description="Biometric verification — liveness, ArcFace embeddings, Qdrant dedup",
+    description="Biometric verification — liveness",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -70,13 +60,8 @@ app.add_middleware(
 class ImagePayload(BaseModel):
     image: str  # base64 encoded image (no data-url prefix)
 
-class EmbeddingPayload(BaseModel):
-    embedding: list[float]
-
-class StorePayload(BaseModel):
-    embedding: list[float]
-    user_id: str
-    email: str
+class ImagePayload(BaseModel):
+    image: str  # base64 encoded image (no data-url prefix)
 
 
 # ─── Endpoints ───────────────────────────────────────────────────────────────
@@ -93,36 +78,7 @@ def verify_liveness(payload: ImagePayload):
     return result
 
 
-@app.post("/extract-embedding")
-def extract_embedding(payload: ImagePayload):
-    """
-    Extract 512-dim ArcFace embedding from image.
-    Returns: { embedding, face_detected }
-    """
-    embedding = extract_arcface_embedding(payload.image)
-    if embedding is None:
-        return {"embedding": [], "face_detected": False}
-    return {"embedding": embedding, "face_detected": True}
 
-
-@app.post("/check-duplicate")
-def check_duplicate(payload: EmbeddingPayload):
-    """
-    Query Qdrant for a matching face.
-    Returns: { is_duplicate, score, matched_point_id, message }
-    """
-    result = check_duplicate_face(payload.embedding)
-    return result
-
-
-@app.post("/store-embedding")
-def store_embedding(payload: StorePayload):
-    """
-    Insert face embedding into Qdrant with user metadata.
-    Returns: { point_id, success }
-    """
-    result = store_face_embedding(payload.embedding, payload.user_id, payload.email)
-    return result
 
 
 @app.get("/health")

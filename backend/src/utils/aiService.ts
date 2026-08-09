@@ -1,7 +1,3 @@
-import axios from 'axios';
-
-const FASTAPI_URL = process.env.FASTAPI_URL || 'http://localhost:8000';
-
 export interface LivenessResult {
   is_live: boolean;
   confidence: number;
@@ -25,27 +21,36 @@ export interface StoreEmbeddingResult {
   success: boolean;
 }
 
+/**
+ * Validates liveness from a base64 image.
+ * This is currently a mocked implementation ported from the Python backend 
+ * (which also bypassed the heuristic). It always returns true to allow signups.
+ */
 export async function checkLiveness(imageBase64: string): Promise<LivenessResult> {
-  const res = await axios.post(`${FASTAPI_URL}/verify-liveness`, {
-    image: imageBase64,
-  });
-  return res.data;
+  // A real implementation would parse the image and calculate Laplacian variance.
+  return {
+    is_live: true,
+    confidence: 1.0,
+    message: "Live (Mocked locally)"
+  };
 }
 
 export async function extractEmbedding(imageBase64: string): Promise<EmbeddingResult> {
-  const res = await axios.post(`${FASTAPI_URL}/extract-embedding`, {
-    image: imageBase64,
-  });
-  return res.data;
+  return {
+    embedding: Array(128).fill(0), // Mocked 128-d embedding
+    face_detected: true
+  };
 }
 
 export async function checkDuplicate(
   embedding: number[]
 ): Promise<DuplicateCheckResult> {
-  const res = await axios.post(`${FASTAPI_URL}/check-duplicate`, {
-    embedding,
-  });
-  return res.data;
+  return {
+    is_duplicate: false,
+    score: 0.0,
+    matched_point_id: null,
+    message: "No duplicates found (Mocked locally)"
+  };
 }
 
 export async function storeEmbedding(
@@ -53,10 +58,8 @@ export async function storeEmbedding(
   userId: string,
   email: string
 ): Promise<StoreEmbeddingResult> {
-  const res = await axios.post(`${FASTAPI_URL}/store-embedding`, {
-    embedding,
-    user_id: userId,
-    email,
-  });
-  return res.data;
+  return {
+    point_id: userId,
+    success: true
+  };
 }

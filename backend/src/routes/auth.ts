@@ -4,7 +4,7 @@ import jwt from 'jsonwebtoken';
 import { v4 as uuidv4 } from 'uuid';
 import prisma from '../db/prisma';
 import { generateOTP, sendOTPEmail } from '../utils/email';
-import { checkLiveness } from '../utils/fastapi';
+import { checkLiveness } from '../utils/aiService';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
 import { verifyCompanyBackground } from '../utils/verifyCompany';
 import passport from '../utils/passport';

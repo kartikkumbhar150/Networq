@@ -12,13 +12,13 @@ function processDir(dir) {
             let content = fs.readFileSync(fullPath, 'utf8');
             // Find all req.params.xxx and replace with (req.params.xxx as string)
             // But be careful not to replace if already casted
-            // We can just regex eq\.params\.([a-zA-Z0-9_]+)
+            // We can just regex req\.params\.([a-zA-Z0-9_]+)
             // First remove existing casts if any to avoid double casting
-            content = content.replace(/req\.params\.([a-zA-Z0-9_]+) as string/g, 'req.params.');
-            content = content.replace(/\(req\.params\.([a-zA-Z0-9_]+)\)/g, 'req.params.');
+            content = content.replace(/req\.params\.([a-zA-Z0-9_]+) as string/g, 'req.params.$1');
+            content = content.replace(/\(req\.params\.([a-zA-Z0-9_]+) as string\)/g, 'req.params.$1');
             
             // Now apply cast
-            content = content.replace(/req\.params\.([a-zA-Z0-9_]+)/g, '(req.params. as string)');
+            content = content.replace(/req\.params\.([a-zA-Z0-9_]+)/g, '(req.params.$1 as string)');
             fs.writeFileSync(fullPath, content, 'utf8');
         }
     }

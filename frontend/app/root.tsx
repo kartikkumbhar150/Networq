@@ -67,7 +67,7 @@ export default function App() {
     const originalFetch = window.fetch;
     window.fetch = async function (...args) {
       let [resource, config] = args;
-      if (typeof resource === "string" && resource.startsWith("http://localhost:5000")) {
+      if (typeof resource === "string" && resource.startsWith(import.meta.env.VITE_API_URL || "http://localhost:5000")) {
         config = config || {};
         config.credentials = "include";
       }
@@ -75,7 +75,7 @@ export default function App() {
     };
 
     // 2. Auto-login using the HTTPOnly cookie
-    const API = "http://localhost:5000";
+    const API = import.meta.env.VITE_API_URL || "http://localhost:5000";
     originalFetch(`${API}/api/auth/me`, { credentials: "include" })
       .then((res) => {
         if (res.ok) return res.json();

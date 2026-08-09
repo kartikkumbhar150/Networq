@@ -6,7 +6,7 @@ export function meta() {
   return [{ title: "Scan QR – HireX Events" }];
 }
 
-const API = "http://localhost:5000";
+const API = import.meta.env.VITE_API_URL || "http://localhost:5000";
 
 interface ScanResult {
   attendeeName: string;

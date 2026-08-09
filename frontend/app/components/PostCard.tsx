@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router";
 import { Globe, Calendar, MapPin, ThumbsUp, MessageSquare, Repeat, Send } from "lucide-react";
 
-const API = "http://localhost:5000";
+const API = import.meta.env.VITE_API_URL || "http://localhost:5000";
 
 interface PostProps {
   post: any;

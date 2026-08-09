@@ -261,7 +261,7 @@ router.post('/liveness', authMiddleware, async (req: AuthRequest, res: Response)
     
     const base64Image = faceImage.replace(/^data:image\/\w+;base64,/, '');
     
-    // Check liveness via FastAPI ML Service
+    // Check liveness locally via aiService
     const livenessResult = await checkLiveness(base64Image);
     if (!livenessResult.is_live) {
       res.status(403).json({

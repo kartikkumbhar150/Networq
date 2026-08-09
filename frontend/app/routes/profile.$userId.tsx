@@ -6,7 +6,7 @@ import {
   Globe, HeartHandshake, BookOpen, MapPin, ExternalLink, Camera, MessageSquare, CheckCircle2
 } from "lucide-react";
 
-const API = "http://localhost:5000";
+const API = import.meta.env.VITE_API_URL || "http://localhost:5000";
 const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
 export default function UserProfile() {

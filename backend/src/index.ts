@@ -37,8 +37,18 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 // --- Middleware ---------------------------------------------------------------
+const allowedOrigins = process.env.ALLOWED_ORIGINS 
+  ? process.env.ALLOWED_ORIGINS.split(',') 
+  : [process.env.FRONTEND_URL || 'http://localhost:5173'];
+
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+  origin: function (origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true,
 }));
 app.use(express.json({ limit: '25mb' })); // allow base64 face + profile photos
@@ -124,7 +134,7 @@ if (process.env.VERCEL) {
 
     // Graceful shutdown
     const shutdown = (signal: string) => {
-      console.log('[server]: ' + signal + ' received — shutting down...');
+      console.log('[server]: ' + signal + ' received ï¿½ shutting down...');
       wss.clients.forEach(client => client.terminate());
       server.closeAllConnections?.();
       server.close(() => {

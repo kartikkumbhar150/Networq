@@ -1,17 +1,6 @@
-version: "3.8"
+version: '3.8'
 
 services:
-  redis:
-    image: redis:alpine
-    container_name: hirex_redis
-    restart: unless-stopped
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-
-
-
   backend:
     image: kartikkumbhar150/hirex_backend:latest
     build:
@@ -19,24 +8,7 @@ services:
     container_name: hirex_backend
     restart: unless-stopped
     ports:
-      - "5000:5000"
-    depends_on:
-      - python
-      - redis
+      - '5000:5000'
     env_file:
       - ./backend/.env
 
-  python:
-    image: kartikkumbhar150/hirex_python:latest
-    build:
-      context: ./python
-    container_name: hirex_python
-    restart: unless-stopped
-    ports:
-      - "8000:8000"
-    env_file:
-      - ./python/.env
-
-volumes:
-  redis_data:
-    driver: local

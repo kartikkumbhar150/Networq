@@ -1,63 +1,48 @@
-import { createClient } from 'redis';
-
-const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
-
-export const redisClient = createClient({
-    url: redisUrl
-});
-
-let isConnected = false;
-
-redisClient.on('error', (err) => {
-    console.error('[db]: Redis Client Error:', err.message);
-    isConnected = false;
-});
-
-redisClient.on('connect', () => {
-    isConnected = true;
-    console.log('[db]: Redis connected successfully.');
-});
-
-// Non-blocking connection init
-redisClient.connect().catch(err => {
-    console.warn('[db]: Initial Redis connection failed. Retrying in background...');
-});
+/**
+ * In-memory cache replacing the former Redis implementation.
+ * Ensures the app can run via `npm run dev` without needing a dockerized Redis.
+ */
+const memoryCache = new Map<string, { value: any, expiry: number }>();
 
 /**
- * Safely sets a cache value if Redis is connected.
- * TTL is in seconds (Default 900s = 15 minutes)
+ * Safely sets a cache value in memory.
  */
 export async function setCache(key: string, value: any, ttlSeconds: number = 900) {
-    if (!isConnected) return;
     try {
-        await redisClient.setEx(key, ttlSeconds, JSON.stringify(value));
+        const expiry = Date.now() + (ttlSeconds * 1000);
+        memoryCache.set(key, { value, expiry });
     } catch (error) {
-        console.error(`[Redis] Error setting cache for ${key}`, error);
+        console.error(`[Cache] Error setting cache for ${key}`, error);
     }
 }
 
 /**
- * Safely gets a cache value if Redis is connected.
+ * Safely gets a cache value from memory.
  */
 export async function getCache<T>(key: string): Promise<T | null> {
-    if (!isConnected) return null;
     try {
-        const data = await redisClient.get(key);
-        return data ? JSON.parse(data) : null;
+        const item = memoryCache.get(key);
+        if (!item) return null;
+
+        if (Date.now() > item.expiry) {
+            memoryCache.delete(key);
+            return null;
+        }
+
+        return item.value as T;
     } catch (error) {
-        console.error(`[Redis] Error getting cache for ${key}`, error);
+        console.error(`[Cache] Error getting cache for ${key}`, error);
         return null;
     }
 }
 
 /**
- * Sweeps the entire redis cache to ensure fresh data after mutations.
+ * Sweeps the entire cache to ensure fresh data after mutations.
  */
 export async function flushAllCache() {
-    if (!isConnected) return;
     try {
-        await redisClient.flushDb();
+        memoryCache.clear();
     } catch (error) {
-        console.error(`[Redis] Error flushing cache`, error);
+        console.error(`[Cache] Error flushing cache`, error);
     }
 }
